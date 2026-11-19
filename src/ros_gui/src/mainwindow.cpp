@@ -832,12 +832,12 @@ void MainWindow::refreshUi()
     {
         recordStatusLabel_->setText(
             QString("记录状态: ● 记录中 (%1)").arg(QString::fromStdString(current_log_file_)));
-        recordStatusLabel_->setStyleSheet("QLabel { color: #4cd17b; font-weight: 600; }");
+        recordStatusLabel_->setStyleSheet("QLabel { color: #15803d; font-weight: 700; }");
     }
     else
     {
         recordStatusLabel_->setText("记录状态: 未记录");
-        recordStatusLabel_->setStyleSheet("QLabel { color: #8494a8; }");
+        recordStatusLabel_->setStyleSheet("QLabel { color: #475569; }");
     }
 
     // 关节状态表刷新（左臂: 10~19, 右臂: 0~9，保持原有控制层索引映射不变）
