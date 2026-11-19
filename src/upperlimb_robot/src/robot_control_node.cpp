@@ -1427,6 +1427,10 @@ private:
         }
 
         rec.mode = mode;
+        upperlimb_robot::copySanitizedTag(
+            rec.param_preset,
+            sizeof(rec.param_preset),
+            upperlimb_robot::formatParamPreset(mode, active_exp_params_));
         rec.passive_joint_profile = active_exp_params_.passive_joint_profile;
         rec.passive_speed_level = active_exp_params_.passive_speed_level;
         rec.admittance_damping_level = active_exp_params_.admittance_damping_level;

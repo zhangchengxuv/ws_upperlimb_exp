@@ -61,11 +61,15 @@ namespace upperlimb_robot
       return std::string(buf);
     }
 
-    void appendJointColumns(std::ostringstream &oss, const char *prefix)
+    void appendJointColumns(std::ostringstream &oss, const char *prefix, const char *unit_suffix = "")
     {
       for (const char *name : ACTIVE_JOINT_NAMES)
       {
         oss << "," << prefix << "_" << name;
+        if (unit_suffix != nullptr && unit_suffix[0] != '\0')
+        {
+          oss << "_" << unit_suffix;
+        }
       }
     }
 
@@ -73,12 +77,12 @@ namespace upperlimb_robot
     {
       for (const char *sname : SENSOR_NAMES)
       {
-        oss << "," << prefix << "_" << sname << "_fx"
-            << "," << prefix << "_" << sname << "_fy"
-            << "," << prefix << "_" << sname << "_fz"
-            << "," << prefix << "_" << sname << "_mx"
-            << "," << prefix << "_" << sname << "_my"
-            << "," << prefix << "_" << sname << "_mz";
+        oss << "," << prefix << "_" << sname << "_fx_N"
+            << "," << prefix << "_" << sname << "_fy_N"
+            << "," << prefix << "_" << sname << "_fz_N"
+            << "," << prefix << "_" << sname << "_mx_Nm"
+            << "," << prefix << "_" << sname << "_my_Nm"
+            << "," << prefix << "_" << sname << "_mz_Nm";
       }
     }
 
@@ -123,10 +127,11 @@ namespace upperlimb_robot
       rec.tau_int[k] = diag.tau_int_nm[idx];
       rec.qa[k] = diag.qa_deg[idx];
       rec.dqa[k] = diag.dqa_deg_s[idx];
+      rec.ddqa[k] = diag.ddqa_deg_s2[idx];
       rec.tau_grav[k] = diag.tau_grav_nm[idx];
       rec.tau_fric[k] = diag.tau_fric_nm[idx];
       rec.tau_cmd[k] = output.use_torque[idx] ? output.target_torque[idx] : 0.0;
-      rec.tau_fb[k] = motor_state.torque[idx];
+      rec.tau_meas[k] = motor_state.torque[idx];
     }
 
     rec.sat_ft_any = diag.ft_saturated ? 1 : 0;
@@ -144,35 +149,36 @@ namespace upperlimb_robot
     std::ostringstream oss;
 
     // 1. 试验信息
-    oss << "subject_id,condition,trial_id,mode,event_tag,"
+    oss << "subject_id,condition,trial_id,mode,param_preset,event_tag,"
         << "passive_joint_profile,passive_speed_level,admittance_damping_level";
 
-    // 2. 实时性体检
+    // 2. 实时性体检（单位：s / ms）
     oss << ",tick,monotonic_time_s,actual_dt_ms,state_elapsed_ms,"
         << "control_elapsed_ms,dropped_frames";
 
-    // 3. 轨迹与状态（14 主动关节）
-    appendJointColumns(oss, "qd");
-    appendJointColumns(oss, "qc");
-    appendJointColumns(oss, "q");
-    appendJointColumns(oss, "dq");
+    // 3. 轨迹与状态（14 主动关节，角度统一使用 deg / deg_s）
+    appendJointColumns(oss, "qd", "deg");
+    appendJointColumns(oss, "qc", "deg");
+    appendJointColumns(oss, "q", "deg");
+    appendJointColumns(oss, "dq", "deg_s");
     appendJointColumns(oss, "en");
     appendJointColumns(oss, "sat");
     oss << ",sat_ft_any";
 
-    // 4. 六维力（原始值 raw_ft_*、零偏 ft_bias_*、处理值 proc_ft_* 严格分开命名）
+    // 4. 六维力（原始值 raw_ft_*、零偏 ft_bias_*、处理值 proc_ft_*，单位 _N / _Nm）
     appendForceColumns(oss, "raw_ft");
     appendForceColumns(oss, "ft_bias");
     appendForceColumns(oss, "proc_ft");
-    appendJointColumns(oss, "tau_int");
+    appendJointColumns(oss, "tau_int", "Nm");
 
-    // 5. 导纳与力矩分解
-    appendJointColumns(oss, "qa");
-    appendJointColumns(oss, "dqa");
-    appendJointColumns(oss, "tau_grav");
-    appendJointColumns(oss, "tau_fric");
-    appendJointColumns(oss, "tau_cmd");
-    appendJointColumns(oss, "tau_fb");
+    // 5. 导纳内部状态与力矩分解（deg / deg_s / deg_s2 / Nm）
+    appendJointColumns(oss, "qa", "deg");
+    appendJointColumns(oss, "dqa", "deg_s");
+    appendJointColumns(oss, "ddqa", "deg_s2");
+    appendJointColumns(oss, "tau_grav", "Nm");
+    appendJointColumns(oss, "tau_fric", "Nm");
+    appendJointColumns(oss, "tau_cmd", "Nm");
+    appendJointColumns(oss, "tau_meas", "Nm");
 
     return oss.str();
   }
@@ -366,6 +372,7 @@ namespace upperlimb_robot
         << rec.condition << ","
         << rec.trial_id << ","
         << rec.mode << ","
+        << rec.param_preset << ","
         << rec.event_tag << ","
         << rec.passive_joint_profile << ","
         << rec.passive_speed_level << ","
@@ -423,10 +430,11 @@ namespace upperlimb_robot
 
     write_doubles(rec.qa);
     write_doubles(rec.dqa);
+    write_doubles(rec.ddqa);
     write_doubles(rec.tau_grav);
     write_doubles(rec.tau_fric);
     write_doubles(rec.tau_cmd);
-    write_doubles(rec.tau_fb);
+    write_doubles(rec.tau_meas);
 
     oss << "\n";
     file_ << oss.str();

@@ -428,6 +428,62 @@ namespace upperlimb_robot
     return g_exp_params;
   }
 
+  std::string formatParamPreset(int mode, const ExperimentRuntimeParams &params)
+  {
+    if (mode == MODE_PASSIVE || mode == MODE_PASSIVE_SINE_PD_FF)
+    {
+      const char *joint_tag = "combined";
+      switch (params.passive_joint_profile)
+      {
+      case PASSIVE_JOINT_J4_ONLY:
+        joint_tag = "GH1";
+        break;
+      case PASSIVE_JOINT_J5_ONLY:
+        joint_tag = "GH2";
+        break;
+      case PASSIVE_JOINT_J6_ONLY:
+        joint_tag = "GH3";
+        break;
+      case PASSIVE_JOINT_J7_ONLY:
+        joint_tag = "EB1";
+        break;
+      case PASSIVE_JOINTS_COMBINED:
+      default:
+        joint_tag = "GH1to3_EB1";
+        break;
+      }
+      const char *speed_tag =
+          (params.passive_speed_level == PASSIVE_SPEED_SLOW) ? "slow_0.5x" : "std_1.0x";
+      return std::string("passive_") + joint_tag + "_" + speed_tag;
+    }
+
+    if (mode == MODE_ACTIVE || mode == MODE_RIGHT_ACTIVE || mode == MODE_BILATERAL_ACTIVE)
+    {
+      switch (params.admittance_damping_level)
+      {
+      case ADMITTANCE_DAMPING_LOW:
+        return "admittance_damp_low_0.7x";
+      case ADMITTANCE_DAMPING_HIGH:
+        return "admittance_damp_high_1.5x";
+      case ADMITTANCE_DAMPING_STANDARD:
+      default:
+        return "admittance_damp_std_1.0x";
+      }
+    }
+
+    if (mode == MODE_ZERO_FORCE || mode == MODE_RIGHT_ZERO_FORCE || mode == MODE_BILATERAL_ZERO_FORCE)
+    {
+      return "zero_force_default";
+    }
+
+    if (mode == MODE_LEFT_PRESET_POSITION || mode == MODE_RIGHT_PRESET_POSITION)
+    {
+      return "preset_position";
+    }
+
+    return "idle";
+  }
+
   // ===================== 位置换算 =====================
 
   double jointDegToPulse(int axis, double joint_deg)
@@ -923,6 +979,7 @@ namespace upperlimb_robot
         diag->qd_deg[idx] = left_active_q_adm(static_cast<Eigen::Index>(i)) * RAD2DEG;
         diag->qa_deg[idx] = left_active_q_adm(static_cast<Eigen::Index>(i)) * RAD2DEG;
         diag->dqa_deg_s[idx] = left_active_dq_adm(static_cast<Eigen::Index>(i)) * RAD2DEG;
+        diag->ddqa_deg_s2[idx] = ddq_adm(static_cast<Eigen::Index>(i)) * RAD2DEG;
         diag->tau_int_nm[idx] = tau_ext(static_cast<Eigen::Index>(i));
         diag->tau_grav_nm[idx] = tau_grav(static_cast<Eigen::Index>(i));
         diag->tau_fric_nm[idx] = tau_fric(static_cast<Eigen::Index>(i));
@@ -1280,6 +1337,7 @@ namespace upperlimb_robot
         diag->qd_deg[idx] = right_active_q_adm(static_cast<Eigen::Index>(i)) * RAD2DEG;
         diag->qa_deg[idx] = right_active_q_adm(static_cast<Eigen::Index>(i)) * RAD2DEG;
         diag->dqa_deg_s[idx] = right_active_dq_adm(static_cast<Eigen::Index>(i)) * RAD2DEG;
+        diag->ddqa_deg_s2[idx] = ddq_adm(static_cast<Eigen::Index>(i)) * RAD2DEG;
         diag->tau_int_nm[idx] = tau_ext(static_cast<Eigen::Index>(i));
         diag->tau_grav_nm[idx] = tau_grav(static_cast<Eigen::Index>(i));
         diag->tau_fric_nm[idx] = tau_fric(static_cast<Eigen::Index>(i));
@@ -3076,6 +3134,7 @@ namespace upperlimb_robot
         diag->qd_deg[left_ctrl_id[i]] = bilateral_active_q_adm(left_q_id[i]) * RAD2DEG;
         diag->qa_deg[left_ctrl_id[i]] = bilateral_active_q_adm(left_q_id[i]) * RAD2DEG;
         diag->dqa_deg_s[left_ctrl_id[i]] = bilateral_active_dq_adm(left_v_id[i]) * RAD2DEG;
+        diag->ddqa_deg_s2[left_ctrl_id[i]] = ddq_adm(left_v_id[i]) * RAD2DEG;
         diag->tau_int_nm[left_ctrl_id[i]] = tau_ext(left_v_id[i]);
         diag->tau_grav_nm[left_ctrl_id[i]] = tau_grav(left_v_id[i]);
         diag->tau_fric_nm[left_ctrl_id[i]] = tau_fric(left_v_id[i]);
@@ -3084,6 +3143,7 @@ namespace upperlimb_robot
         diag->qd_deg[right_ctrl_id[i]] = bilateral_active_q_adm(right_q_id[i]) * RAD2DEG;
         diag->qa_deg[right_ctrl_id[i]] = bilateral_active_q_adm(right_q_id[i]) * RAD2DEG;
         diag->dqa_deg_s[right_ctrl_id[i]] = bilateral_active_dq_adm(right_v_id[i]) * RAD2DEG;
+        diag->ddqa_deg_s2[right_ctrl_id[i]] = ddq_adm(right_v_id[i]) * RAD2DEG;
         diag->tau_int_nm[right_ctrl_id[i]] = tau_ext(right_v_id[i]);
         diag->tau_grav_nm[right_ctrl_id[i]] = tau_grav(right_v_id[i]);
         diag->tau_fric_nm[right_ctrl_id[i]] = tau_fric(right_v_id[i]);

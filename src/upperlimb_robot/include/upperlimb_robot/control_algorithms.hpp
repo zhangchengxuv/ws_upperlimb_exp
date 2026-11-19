@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace upperlimb_robot
 {
@@ -158,6 +159,9 @@ namespace upperlimb_robot
   void setExperimentRuntimeParams(const ExperimentRuntimeParams &params);
   ExperimentRuntimeParams getExperimentRuntimeParams();
 
+  // 生成供 CSV 日志 param_preset 列使用的可读档位标签
+  std::string formatParamPreset(int mode, const ExperimentRuntimeParams &params);
+
   // ===================== 电机状态缓存 =====================
   //
   // 对外统一使用真实物理量：
@@ -236,9 +240,10 @@ namespace upperlimb_robot
     // 原始轨迹参考位置（deg），被动正弦为 q_ref，主动导纳为 q_adm
     std::array<double, AXIS_NUM> qd_deg{};
 
-    // 导纳内部参考状态（deg / deg/s）
+    // 导纳内部参考状态（deg / deg/s / deg/s^2）
     std::array<double, AXIS_NUM> qa_deg{};
     std::array<double, AXIS_NUM> dqa_deg_s{};
+    std::array<double, AXIS_NUM> ddqa_deg_s2{};
 
     // 映射交互力矩 J^T F（Nm，Pinocchio 模型方向）
     std::array<double, AXIS_NUM> tau_int_nm{};

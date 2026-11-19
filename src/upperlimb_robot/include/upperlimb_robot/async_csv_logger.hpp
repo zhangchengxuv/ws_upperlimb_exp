@@ -30,6 +30,7 @@ namespace upperlimb_robot
     char subject_id[32]{};
     char condition[48]{};
     char trial_id[32]{};
+    char param_preset[48]{};
     char event_tag[32]{};
 
     int mode{0};
@@ -45,7 +46,7 @@ namespace upperlimb_robot
     double control_elapsed_ms{0.0};
     std::uint64_t dropped_frames{0};
 
-    // 轨迹与状态（deg / deg/s）
+    // 轨迹与状态（统一使用 deg / deg/s）
     std::array<double, ACTIVE_DOF> qd{};
     std::array<double, ACTIVE_DOF> qc{};
     std::array<double, ACTIVE_DOF> q{};
@@ -54,7 +55,7 @@ namespace upperlimb_robot
     std::array<std::uint8_t, ACTIVE_DOF> sat{};
     std::uint8_t sat_ft_any{0};
 
-    // 六维力：原始值、零偏、处理值（顺序：0=RH, 1=RA, 2=LH, 3=LA）
+    // 六维力：原始值、零偏、处理值（N / Nm，顺序：0=RH, 1=RA, 2=LH, 3=LA）
     std::array<ForceSensorData, FORCE_SENSOR_NUM> raw_ft{};
     std::array<ForceSensorData, FORCE_SENSOR_NUM> ft_bias{};
     std::array<ForceSensorData, FORCE_SENSOR_NUM> proc_ft{};
@@ -62,13 +63,14 @@ namespace upperlimb_robot
     // 映射交互力矩 J^T F（Nm）
     std::array<double, ACTIVE_DOF> tau_int{};
 
-    // 导纳参考与力矩分解（deg / deg/s / Nm）
+    // 导纳参考与力矩分解（deg / deg/s / deg/s^2 / Nm）
     std::array<double, ACTIVE_DOF> qa{};
     std::array<double, ACTIVE_DOF> dqa{};
+    std::array<double, ACTIVE_DOF> ddqa{};
     std::array<double, ACTIVE_DOF> tau_grav{};
     std::array<double, ACTIVE_DOF> tau_fric{};
     std::array<double, ACTIVE_DOF> tau_cmd{};
-    std::array<double, ACTIVE_DOF> tau_fb{};
+    std::array<double, ACTIVE_DOF> tau_meas{};
   };
 
   // ===================== 辅助填充函数 =====================
