@@ -1,0 +1,14 @@
+robot_control_node:
+  ros__parameters:
+    # 默认 100 Hz，可在启动命令中一键改为 50 Hz：
+    # ros2 launch upperlimb_robot exp_control.launch.py control_hz:=50 state_hz:=50
+    control_hz: 100
+    state_hz: 100
+    publish_divider: 5
+    status_read_divider: 20
+
+    # 留空时默认自动加载包共享目录下的 config/Gecat.eni（无硬编码本机绝对路径）
+    ecat_config_path: ""
+
+    # 异步 CSV 日志默认输出目录（相对当前启动目录，自动创建）
+    log_output_dir: "data"

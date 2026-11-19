@@ -1,0 +1,22 @@
+# ROS 2 构建与运行产物
+build/
+install/
+log/
+
+# 实验数据与日志文件
+data/
+*.csv
+*.log
+
+# Python / IDE 临时文件
+__pycache__/
+*.py[cod]
+*.workspace.user*
+.qtc_clangd/
+.vscode/
+.DS_Store
+
+# 注意：以下真机编译与界面必需资源严禁忽略，确保跨机 git clone 后可直接编译运行：
+# - src/upperlimb_robot/lib/*.so
+# - src/upperlimb_robot/config/Gecat.eni
+# - src/ros_gui/resource/
