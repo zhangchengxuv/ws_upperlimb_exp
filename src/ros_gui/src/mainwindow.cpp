@@ -8,6 +8,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QMutexLocker>
+#include <QScrollArea>
 #include <QSplitter>
 #include <QStyle>
 #include <QVBoxLayout>
@@ -120,31 +121,44 @@ MainWindow::MainWindow(QWidget *parent)
     mainSplitter->setChildrenCollapsible(false);
 
     // ================================
-    // 左侧控制区
+    // 左侧控制区（带无边框滚动容器，保证高密度实验按钮完整展示不挤压）
     // ================================
     QGroupBox *controlGroup = new QGroupBox("控制模式与安全操作", mainSplitter);
     controlGroup->setObjectName("sidebarPanel");
-    QVBoxLayout *controlLayout = new QVBoxLayout(controlGroup);
-    controlLayout->setContentsMargins(10, 12, 10, 10);
-    controlLayout->setSpacing(6);
+    QVBoxLayout *controlOuterLayout = new QVBoxLayout(controlGroup);
+    controlOuterLayout->setContentsMargins(6, 10, 6, 8);
+    controlOuterLayout->setSpacing(0);
 
-    auto addSectionTitle = [controlGroup, controlLayout](const QString &text)
+    QScrollArea *controlScroll = new QScrollArea(controlGroup);
+    controlScroll->setWidgetResizable(true);
+    controlScroll->setFrameShape(QFrame::NoFrame);
+    controlScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    controlScroll->setStyleSheet("QScrollArea { background: transparent; border: none; }");
+
+    QWidget *controlContent = new QWidget(controlScroll);
+    controlContent->setStyleSheet("background: transparent;");
+    QVBoxLayout *controlLayout = new QVBoxLayout(controlContent);
+    controlLayout->setContentsMargins(4, 2, 4, 4);
+    controlLayout->setSpacing(5);
+
+    auto addSectionTitle = [controlContent, controlLayout](const QString &text)
     {
-        QLabel *label = new QLabel(text, controlGroup);
+        QLabel *label = new QLabel(text, controlContent);
         label->setProperty("role", "sectionTitle");
         controlLayout->addWidget(label);
     };
 
     // 1. 醒目的安全停止 / 空闲按钮
-    idleButton_ = new QPushButton("安全停止 / 空闲 (MODE=0)", controlGroup);
+    idleButton_ = new QPushButton("安全停止 / 空闲 (MODE=0)", controlContent);
     idleButton_->setObjectName("safetyStopButton");
 
-    // 2. 恢复初始位置按钮（原样保留）
-    leftPresetButton_ = new QPushButton("左臂恢复初始位置 (MODE=1)", controlGroup);
-    rightPresetButton_ = new QPushButton("右臂恢复初始位置 (MODE=2)", controlGroup);
+    // 2. 恢复初始位置按钮（单臂原样保留 + 新增双臂同步恢复初始）
+    leftPresetButton_ = new QPushButton("左臂恢复初始位置 (MODE=1)", controlContent);
+    rightPresetButton_ = new QPushButton("右臂恢复初始位置 (MODE=2)", controlContent);
+    bilateralPresetButton_ = new QPushButton("双臂恢复初始位置 (MODE=20)", controlContent);
 
     // 3. 被动正弦实验按钮与选轴/低速配置
-    passiveJointCombo_ = new QComboBox(controlGroup);
+    passiveJointCombo_ = new QComboBox(controlContent);
     passiveJointCombo_->addItem("单关节 EB1 (肘屈伸)", 4);
     passiveJointCombo_->addItem("单关节 GH1 (肩外展内收)", 1);
     passiveJointCombo_->addItem("单关节 GH3 (肩前屈后伸)", 3);
@@ -152,39 +166,49 @@ MainWindow::MainWindow(QWidget *parent)
     passiveJointCombo_->addItem("组合联动 GH1~GH3 + EB1", 0);
     passiveJointCombo_->setCurrentIndex(4); // 默认组合联动，可一键切单关节
 
-    passiveSpeedCombo_ = new QComboBox(controlGroup);
+    passiveSpeedCombo_ = new QComboBox(controlContent);
     passiveSpeedCombo_->addItem("低速 1 档 (慢速 0.5x)", 0);
     passiveSpeedCombo_->addItem("低速 2 档 (标准 1.0x)", 1);
     passiveSpeedCombo_->setCurrentIndex(1);
 
-    leftPassivePIDButton_ = new QPushButton("被动正弦 PID (MODE=5)", controlGroup);
-    leftPassivePDButton_ = new QPushButton("被动正弦 PD+FF (MODE=6)", controlGroup);
+    leftPassivePIDButton_ = new QPushButton("被动正弦 PID (MODE=5)", controlContent);
+    leftPassivePDButton_ = new QPushButton("被动正弦 PD+FF (MODE=6)", controlContent);
 
     // 4. 零力拖动按钮
-    zeroForceButton_ = new QPushButton("左臂零力拖动 (MODE=4)", controlGroup);
-    rightZeroForceButton_ = new QPushButton("右臂零力拖动 (MODE=8)", controlGroup);
-    bilateralZeroForceButton_ = new QPushButton("双臂零力拖动 (MODE=9)", controlGroup);
+    zeroForceButton_ = new QPushButton("左臂零力拖动 (MODE=4)", controlContent);
+    rightZeroForceButton_ = new QPushButton("右臂零力拖动 (MODE=8)", controlContent);
+    bilateralZeroForceButton_ = new QPushButton("双臂零力拖动 (MODE=9)", controlContent);
 
-    // 5. 主动导纳按钮与预设阻尼档位
-    admittanceDampingCombo_ = new QComboBox(controlGroup);
-    admittanceDampingCombo_->addItem("低阻尼档 (0.70x 轻快)", 0);
-    admittanceDampingCombo_->addItem("标准阻尼档 (1.00x 原参数)", 1);
-    admittanceDampingCombo_->addItem("高阻尼档 (1.50x 稳重)", 2);
+    // 5. 主动导纳按钮与预设阻尼档位（基线定参 + 创新 IVDA 对照共用标称阻尼档）
+    admittanceDampingCombo_ = new QComboBox(controlContent);
+    admittanceDampingCombo_->addItem("低阻尼档 (0.70x 轻快助力)", 0);
+    admittanceDampingCombo_->addItem("标准阻尼档 (1.00x 均衡助力)", 1);
+    admittanceDampingCombo_->addItem("高阻尼档 (1.50x 稳重阻尼)", 2);
     admittanceDampingCombo_->setCurrentIndex(1);
 
-    activeButton_ = new QPushButton("左臂主动导纳 (MODE=3)", controlGroup);
-    rightActiveButton_ = new QPushButton("右臂主动导纳 (MODE=14)", controlGroup);
-    bilateralActiveButton_ = new QPushButton("双侧主动导纳 (MODE=13)", controlGroup);
+    activeButton_ = new QPushButton("左臂基线导纳 (MODE=3)", controlContent);
+    rightActiveButton_ = new QPushButton("右臂基线导纳 (MODE=14)", controlContent);
+    bilateralActiveButton_ = new QPushButton("双侧基线导纳 (MODE=13)", controlContent);
 
-    interlockHintLabel_ = new QLabel("参数可调（当前空闲态）", controlGroup);
+    // 6. 创新主动对照：意图自适应变阻尼-按需助力导纳（IVDA）
+    leftAdaptiveActiveButton_ = new QPushButton("左臂自适应助力 IVDA (MODE=21)", controlContent);
+    rightAdaptiveActiveButton_ = new QPushButton("右臂自适应助力 IVDA (MODE=22)", controlContent);
+    bilateralAdaptiveActiveButton_ = new QPushButton("双侧自适应助力 IVDA (MODE=23)", controlContent);
+    for (QPushButton *ib : {leftAdaptiveActiveButton_, rightAdaptiveActiveButton_, bilateralAdaptiveActiveButton_})
+    {
+        ib->setProperty("role", "innovativeButton");
+    }
+
+    interlockHintLabel_ = new QLabel("参数可调（当前空闲态）", controlContent);
     interlockHintLabel_->setProperty("role", "panelHint");
     interlockHintLabel_->setWordWrap(true);
 
     const QList<QPushButton *> modeButtons = {
-        idleButton_, leftPresetButton_, rightPresetButton_,
+        idleButton_, leftPresetButton_, rightPresetButton_, bilateralPresetButton_,
         leftPassivePIDButton_, leftPassivePDButton_,
         zeroForceButton_, rightZeroForceButton_, bilateralZeroForceButton_,
-        activeButton_, rightActiveButton_, bilateralActiveButton_};
+        activeButton_, rightActiveButton_, bilateralActiveButton_,
+        leftAdaptiveActiveButton_, rightAdaptiveActiveButton_, bilateralAdaptiveActiveButton_};
 
     QButtonGroup *modeGroup = new QButtonGroup(this);
     modeGroup->setExclusive(true);
@@ -199,6 +223,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(idleButton_, &QPushButton::clicked, this, &MainWindow::onIdleClicked);
     connect(leftPresetButton_, &QPushButton::clicked, this, &MainWindow::onLeftPresetClicked);
     connect(rightPresetButton_, &QPushButton::clicked, this, &MainWindow::onRightPresetClicked);
+    connect(bilateralPresetButton_, &QPushButton::clicked, this, &MainWindow::onBilateralPresetClicked);
     connect(leftPassivePIDButton_, &QPushButton::clicked, this, &MainWindow::onLeftPassivePID);
     connect(leftPassivePDButton_, &QPushButton::clicked, this, &MainWindow::onLeftPassivePD);
     connect(zeroForceButton_, &QPushButton::clicked, this, &MainWindow::onZeroForceClicked);
@@ -207,6 +232,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(activeButton_, &QPushButton::clicked, this, &MainWindow::onActiveClicked);
     connect(rightActiveButton_, &QPushButton::clicked, this, &MainWindow::onRightActiveClicked);
     connect(bilateralActiveButton_, &QPushButton::clicked, this, &MainWindow::onBilateralActiveClicked);
+    connect(leftAdaptiveActiveButton_, &QPushButton::clicked, this, &MainWindow::onLeftAdaptiveActiveClicked);
+    connect(rightAdaptiveActiveButton_, &QPushButton::clicked, this, &MainWindow::onRightAdaptiveActiveClicked);
+    connect(bilateralAdaptiveActiveButton_, &QPushButton::clicked, this, &MainWindow::onBilateralAdaptiveActiveClicked);
 
     connect(passiveJointCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::onExperimentConfigChanged);
@@ -220,6 +248,7 @@ MainWindow::MainWindow(QWidget *parent)
     addSectionTitle("恢复初始位置");
     controlLayout->addWidget(leftPresetButton_);
     controlLayout->addWidget(rightPresetButton_);
+    controlLayout->addWidget(bilateralPresetButton_);
 
     addSectionTitle("实验 1：被动正弦跟踪（左臂）");
     controlLayout->addWidget(passiveJointCombo_);
@@ -232,14 +261,22 @@ MainWindow::MainWindow(QWidget *parent)
     controlLayout->addWidget(rightZeroForceButton_);
     controlLayout->addWidget(bilateralZeroForceButton_);
 
-    addSectionTitle("实验 3：主动导纳");
+    addSectionTitle("实验 3：基线主动导纳（定参）");
     controlLayout->addWidget(admittanceDampingCombo_);
     controlLayout->addWidget(activeButton_);
     controlLayout->addWidget(rightActiveButton_);
     controlLayout->addWidget(bilateralActiveButton_);
 
+    addSectionTitle("实验 4：创新自适应助力 (IVDA)");
+    controlLayout->addWidget(leftAdaptiveActiveButton_);
+    controlLayout->addWidget(rightAdaptiveActiveButton_);
+    controlLayout->addWidget(bilateralAdaptiveActiveButton_);
+
     controlLayout->addWidget(interlockHintLabel_);
     controlLayout->addStretch();
+
+    controlScroll->setWidget(controlContent);
+    controlOuterLayout->addWidget(controlScroll);
 
     // ================================
     // 中间栏：实时性体检 + 异步 CSV 记录 + 视觉节拍引导条
@@ -665,9 +702,13 @@ void MainWindow::publishLoggerCommand(int action, const QString &eventTag)
 void MainWindow::onIdleClicked() { publishCommand(MODE_IDLE); }
 void MainWindow::onLeftPresetClicked() { publishCommand(MODE_LEFT_PRESET_POSITION); }
 void MainWindow::onRightPresetClicked() { publishCommand(MODE_RIGHT_PRESET_POSITION); }
+void MainWindow::onBilateralPresetClicked() { publishCommand(MODE_BILATERAL_PRESET_POSITION); }
 void MainWindow::onActiveClicked() { publishCommand(MODE_ACTIVE); }
 void MainWindow::onRightActiveClicked() { publishCommand(MODE_RIGHT_ACTIVE); }
 void MainWindow::onBilateralActiveClicked() { publishCommand(MODE_BILATERAL_ACTIVE); }
+void MainWindow::onLeftAdaptiveActiveClicked() { publishCommand(MODE_LEFT_ADAPTIVE_ACTIVE); }
+void MainWindow::onRightAdaptiveActiveClicked() { publishCommand(MODE_RIGHT_ADAPTIVE_ACTIVE); }
+void MainWindow::onBilateralAdaptiveActiveClicked() { publishCommand(MODE_BILATERAL_ADAPTIVE_ACTIVE); }
 void MainWindow::onZeroForceClicked() { publishCommand(MODE_ZERO_FORCE); }
 void MainWindow::onRightZeroForceClicked() { publishCommand(MODE_RIGHT_ZERO_FORCE); }
 void MainWindow::onBilateralZeroForceClicked() { publishCommand(MODE_BILATERAL_ZERO_FORCE); }
@@ -928,12 +969,20 @@ QString MainWindow::modeToString(int mode) const
         return "左臂恢复初始位置";
     case MODE_RIGHT_PRESET_POSITION:
         return "右臂恢复初始位置";
+    case MODE_BILATERAL_PRESET_POSITION:
+        return "双臂恢复初始位置";
     case MODE_ACTIVE:
-        return "左臂主动导纳";
+        return "左臂基线主动导纳";
     case MODE_RIGHT_ACTIVE:
-        return "右臂主动导纳";
+        return "右臂基线主动导纳";
     case MODE_BILATERAL_ACTIVE:
-        return "双侧主动导纳";
+        return "双侧基线主动导纳";
+    case MODE_LEFT_ADAPTIVE_ACTIVE:
+        return "左臂自适应助力 (IVDA)";
+    case MODE_RIGHT_ADAPTIVE_ACTIVE:
+        return "右臂自适应助力 (IVDA)";
+    case MODE_BILATERAL_ADAPTIVE_ACTIVE:
+        return "双侧自适应助力 (IVDA)";
     case MODE_ZERO_FORCE:
         return "左臂零力拖动";
     case MODE_RIGHT_ZERO_FORCE:

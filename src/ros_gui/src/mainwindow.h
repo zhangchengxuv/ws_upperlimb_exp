@@ -44,6 +44,10 @@ enum ControlMode : int
     MODE_BILATERAL_ZERO_FORCE = 9,
     MODE_BILATERAL_ACTIVE = 13,
     MODE_RIGHT_ACTIVE = 14,
+    MODE_BILATERAL_PRESET_POSITION = 20,
+    MODE_LEFT_ADAPTIVE_ACTIVE = 21,
+    MODE_RIGHT_ADAPTIVE_ACTIVE = 22,
+    MODE_BILATERAL_ADAPTIVE_ACTIVE = 23,
 };
 
 class MainWindow : public QMainWindow
@@ -59,9 +63,13 @@ private slots:
     void onIdleClicked();
     void onLeftPresetClicked();
     void onRightPresetClicked();
+    void onBilateralPresetClicked();
     void onActiveClicked();
     void onRightActiveClicked();
     void onBilateralActiveClicked();
+    void onLeftAdaptiveActiveClicked();
+    void onRightAdaptiveActiveClicked();
+    void onBilateralAdaptiveActiveClicked();
     void onZeroForceClicked();
     void onRightZeroForceClicked();
     void onBilateralZeroForceClicked();
@@ -131,6 +139,7 @@ private:
     QPushButton *idleButton_ = nullptr;
     QPushButton *leftPresetButton_ = nullptr;
     QPushButton *rightPresetButton_ = nullptr;
+    QPushButton *bilateralPresetButton_ = nullptr;
 
     QComboBox *passiveJointCombo_ = nullptr;
     QComboBox *passiveSpeedCombo_ = nullptr;
@@ -145,6 +154,9 @@ private:
     QPushButton *activeButton_ = nullptr;
     QPushButton *rightActiveButton_ = nullptr;
     QPushButton *bilateralActiveButton_ = nullptr;
+    QPushButton *leftAdaptiveActiveButton_ = nullptr;
+    QPushButton *rightAdaptiveActiveButton_ = nullptr;
+    QPushButton *bilateralAdaptiveActiveButton_ = nullptr;
 
     QLabel *interlockHintLabel_ = nullptr;
 

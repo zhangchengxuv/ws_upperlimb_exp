@@ -145,6 +145,27 @@ QPushButton:disabled {
     border-color: #cbd5e1;
 }
 
+/* 创新对照实验按钮（IVDA 自适应助力导纳，科研靛青高亮区分基线） */
+QPushButton[role="innovativeButton"] {
+    color: #0f4c5c;
+    background-color: #eef9fb;
+    border: 1px solid #0e7490;
+    font-weight: 600;
+}
+
+QPushButton[role="innovativeButton"]:hover {
+    color: #083344;
+    background-color: #d8f3f8;
+    border-color: #0891b2;
+}
+
+QPushButton[role="innovativeButton"]:checked {
+    color: #ffffff;
+    background-color: #0e7490;
+    border: 1px solid #155e75;
+    font-weight: 700;
+}
+
 /* 醒目的安全停止按钮 */
 QPushButton#safetyStopButton {
     min-height: 32px;

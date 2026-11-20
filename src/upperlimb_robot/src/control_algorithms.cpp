@@ -412,6 +412,112 @@ namespace upperlimb_robot
     Eigen::VectorXd bilateral_active_q_adm;
     Eigen::VectorXd bilateral_active_dq_adm;
 
+    // 创新主动对照（IVDA：意图自适应变阻尼-按需助力导纳）内部状态
+    bool left_ivda_initialized = false;
+    Eigen::VectorXd left_ivda_q_adm;
+    Eigen::VectorXd left_ivda_dq_adm;
+    std::array<double, 7> left_ivda_power_filt{};
+    std::array<double, 7> left_ivda_tau_abs_filt{};
+
+    bool right_ivda_initialized = false;
+    Eigen::VectorXd right_ivda_q_adm;
+    Eigen::VectorXd right_ivda_dq_adm;
+    std::array<double, 7> right_ivda_power_filt{};
+    std::array<double, 7> right_ivda_tau_abs_filt{};
+
+    int bilateral_ivda_debug_counter = 0;
+    int bilateral_ivda_fault_counter = 0;
+    bool bilateral_ivda_initialized = false;
+    Eigen::VectorXd bilateral_ivda_q_adm;
+    Eigen::VectorXd bilateral_ivda_dq_adm;
+    std::array<double, 7> bilateral_ivda_left_power_filt{};
+    std::array<double, 7> bilateral_ivda_left_tau_abs_filt{};
+    std::array<double, 7> bilateral_ivda_right_power_filt{};
+    std::array<double, 7> bilateral_ivda_right_tau_abs_filt{};
+
+    // ===================== 统一标称主动导纳参数（基线定参导纳与创新 IVDA 共用同一标称基准，保证严格消融对照） =====================
+    // 基于 2026-11-20 DAONA_145120 实机分析：原 D_a=45/20/12 导致 56%~75% 反向制动，现降阻提效至正向助力区
+    constexpr double ADMITTANCE_INPUT_GAIN_NOMINAL = 1.50;
+    constexpr std::array<double, 7> ADMITTANCE_M_NOMINAL = {
+        1.20, 1.20, 0.90, 0.55, 0.55, 0.45, 0.30};
+    constexpr std::array<double, 7> ADMITTANCE_D_NOMINAL = {
+        12.0, 12.0, 9.5, 6.5, 6.0, 5.5, 3.5};
+    constexpr std::array<double, 7> ADMITTANCE_K_NOMINAL = {
+        4.0, 4.0, 3.2, 2.2, 2.0, 1.8, 1.2};
+    constexpr std::array<double, 7> ADMITTANCE_KP_NOMINAL = {
+        22.0, 22.0, 18.0, 16.0, 16.0, 14.0, 10.0};
+    constexpr std::array<double, 7> ADMITTANCE_KV_NOMINAL = {
+        4.0, 4.0, 3.0, 2.5, 2.5, 2.0, 1.5};
+    constexpr std::array<double, 7> ADMITTANCE_DDQ_LIMIT = {
+        6.0, 6.0, 6.0, 8.0, 8.0, 8.0, 10.0};
+    constexpr std::array<double, 7> ADMITTANCE_DQ_LIMIT = {
+        1.2, 1.2, 1.2, 1.8, 1.8, 1.8, 2.0};
+
+    // 创新 IVDA 变阻尼-按需助力（Intent-Adaptive Variable-Damping & AAN）单关节更新器
+    // 严格保证 D_eff > 0、K_eff > 0、tau_aan 有界且在松手/减速时自动归零，确保无源稳定
+    struct IvdaJointStepOutput
+    {
+      double d_eff{0.0};
+      double k_eff{0.0};
+      double tau_aan{0.0};
+    };
+
+    inline IvdaJointStepOutput computeIvdaAdaptiveTerms(
+        std::size_t joint_idx,
+        double tau_ext_i,
+        double dq_adm_i,
+        double d0_i,
+        double k0_i,
+        double dt,
+        double &power_filt,
+        double &tau_abs_filt)
+    {
+      constexpr std::array<double, 7> P_REF = {1.50, 1.50, 1.00, 0.70, 0.70, 0.60, 0.35};
+      constexpr std::array<double, 7> TAU_REL = {0.90, 0.90, 0.70, 0.45, 0.45, 0.40, 0.25};
+      constexpr std::array<double, 7> AAN_GAIN = {0.40, 0.35, 0.40, 0.40, 0.35, 0.35, 0.35};
+      constexpr std::array<double, 7> AAN_LIMIT = {6.0, 4.0, 4.0, 3.5, 3.0, 3.0, 2.0};
+
+      // 一阶低通滤波（时间常数 60 ms，dt 自适应，50 Hz / 100 Hz 等效）
+      const double lp_alpha = clampBetween(dt / (0.06 + dt), 0.02, 0.50);
+      const double p_raw = tau_ext_i * dq_adm_i;
+      power_filt += lp_alpha * (p_raw - power_filt);
+      tau_abs_filt += lp_alpha * (std::abs(tau_ext_i) - tau_abs_filt);
+
+      // 1. 意图功率归一化指标 sigma in (-1, 1)：>0 主动加速意图，<0 减速制动意图
+      const double p_ref = P_REF[joint_idx];
+      const double sigma = std::tanh(power_filt / p_ref);
+
+      // 2. 松手/悬停识别权重 release_w in (0, 1]：|tau_ext|->0 时趋近 1，平滑增大阻尼实现柔和定姿
+      const double tau_ratio = tau_abs_filt / TAU_REL[joint_idx];
+      const double release_w = std::exp(-(tau_ratio * tau_ratio));
+
+      double d_intent = d0_i;
+      double k_intent = k0_i;
+      if (sigma >= 0.0)
+      {
+        // 主动发力相：平滑降阻尼至最低 0.45*D0、松弛虚拟锚定至 0.55*K0，顺水推舟
+        d_intent = d0_i * (1.0 - 0.55 * sigma);
+        k_intent = k0_i * (1.0 - 0.45 * sigma);
+      }
+      else
+      {
+        // 减速/反向制动相：平滑增阻尼至最高 1.65*D0、收紧锚定至 1.30*K0，抑制过冲
+        d_intent = d0_i * (1.0 - 0.65 * sigma);
+        k_intent = k0_i * (1.0 - 0.30 * sigma);
+      }
+
+      IvdaJointStepOutput res{};
+      res.d_eff = (1.0 - release_w) * d_intent + release_w * (1.50 * d0_i);
+      res.k_eff = (1.0 - release_w) * k_intent + release_w * (1.30 * k0_i);
+
+      // 3. 功率门控同向按需助力前馈（仅主动同向运动时平滑开启，松手或减速立即归零）
+      const double gate_power =
+          0.5 * (1.0 + std::tanh((power_filt - 0.06 * p_ref) / (0.18 * p_ref)));
+      const double phi = gate_power * (1.0 - release_w);
+      res.tau_aan = clampAbs(AAN_GAIN[joint_idx] * phi * tau_ext_i, AAN_LIMIT[joint_idx]);
+      return res;
+    }
+
     // 左臂被动正弦（PID）内部状态
     bool passive_pid_initialized = false;
     bool passive_pid_first_step = true;
@@ -483,6 +589,22 @@ namespace upperlimb_robot
       }
     }
 
+    if (mode == MODE_LEFT_ADAPTIVE_ACTIVE ||
+        mode == MODE_RIGHT_ADAPTIVE_ACTIVE ||
+        mode == MODE_BILATERAL_ADAPTIVE_ACTIVE)
+    {
+      switch (params.admittance_damping_level)
+      {
+      case ADMITTANCE_DAMPING_LOW:
+        return "ivda_adaptive_damp_low_0.7x";
+      case ADMITTANCE_DAMPING_HIGH:
+        return "ivda_adaptive_damp_high_1.5x";
+      case ADMITTANCE_DAMPING_STANDARD:
+      default:
+        return "ivda_adaptive_damp_std_1.0x";
+      }
+    }
+
     if (mode == MODE_ZERO_FORCE || mode == MODE_RIGHT_ZERO_FORCE || mode == MODE_BILATERAL_ZERO_FORCE)
     {
       return "zero_force_default";
@@ -491,6 +613,11 @@ namespace upperlimb_robot
     if (mode == MODE_LEFT_PRESET_POSITION || mode == MODE_RIGHT_PRESET_POSITION)
     {
       return "preset_position";
+    }
+
+    if (mode == MODE_BILATERAL_PRESET_POSITION)
+    {
+      return "preset_position_bilateral";
     }
 
     return "idle";
@@ -638,6 +765,40 @@ namespace upperlimb_robot
     bilateral_active_q_adm.resize(0);
     bilateral_active_dq_adm.resize(0);
     std::cout << "[resetBilateralActiveMode] 双侧主动模式状态已重置" << std::endl;
+  }
+
+  void resetLeftAdaptiveActiveMode()
+  {
+    left_ivda_initialized = false;
+    left_ivda_q_adm.resize(0);
+    left_ivda_dq_adm.resize(0);
+    left_ivda_power_filt.fill(0.0);
+    left_ivda_tau_abs_filt.fill(0.0);
+    std::cout << "[resetLeftAdaptiveActiveMode] 左臂创新自适应助力导纳(IVDA)状态已重置" << std::endl;
+  }
+
+  void resetRightAdaptiveActiveMode()
+  {
+    right_ivda_initialized = false;
+    right_ivda_q_adm.resize(0);
+    right_ivda_dq_adm.resize(0);
+    right_ivda_power_filt.fill(0.0);
+    right_ivda_tau_abs_filt.fill(0.0);
+    std::cout << "[resetRightAdaptiveActiveMode] 右臂创新自适应助力导纳(IVDA)状态已重置" << std::endl;
+  }
+
+  void resetBilateralAdaptiveActiveMode()
+  {
+    bilateral_ivda_debug_counter = 0;
+    bilateral_ivda_fault_counter = 0;
+    bilateral_ivda_initialized = false;
+    bilateral_ivda_q_adm.resize(0);
+    bilateral_ivda_dq_adm.resize(0);
+    bilateral_ivda_left_power_filt.fill(0.0);
+    bilateral_ivda_left_tau_abs_filt.fill(0.0);
+    bilateral_ivda_right_power_filt.fill(0.0);
+    bilateral_ivda_right_tau_abs_filt.fill(0.0);
+    std::cout << "[resetBilateralAdaptiveActiveMode] 双侧创新自适应助力导纳(IVDA)状态已重置" << std::endl;
   }
 
   void resetPassiveMode()
@@ -873,7 +1034,7 @@ namespace upperlimb_robot
         J_arm.transpose() * f_arm.toVector() +
         J_hand.transpose() * f_hand.toVector();
 
-    // ===================== 导纳模型（使用实际控制周期 dt_s） =====================
+    // ===================== 导纳模型（基线定参导纳，使用实际控制周期 dt_s） =====================
     const double dt = clampControlDt(dt_s);
     const double damping_scale =
         getAdmittanceDampingScale(g_exp_params.admittance_damping_level);
@@ -882,37 +1043,22 @@ namespace upperlimb_robot
     Eigen::VectorXd D_a = Eigen::VectorXd::Zero(model.nv);
     Eigen::VectorXd K_a = Eigen::VectorXd::Zero(model.nv);
 
-    M_a(0) = 4.0;
-    M_a(1) = 4.0;
-    M_a(2) = 3.0;
-    M_a(3) = 1.5;
-    M_a(4) = 1.5;
-    M_a(5) = 1.2;
-    M_a(6) = 0.8;
-
-    D_a(0) = 45.0 * damping_scale;
-    D_a(1) = 45.0 * damping_scale;
-    D_a(2) = 35.0 * damping_scale;
-    D_a(3) = 20.0 * damping_scale;
-    D_a(4) = 20.0 * damping_scale;
-    D_a(5) = 18.0 * damping_scale;
-    D_a(6) = 12.0 * damping_scale;
-
-    K_a(0) = 18.0;
-    K_a(1) = 18.0;
-    K_a(2) = 14.0;
-    K_a(3) = 8.0;
-    K_a(4) = 8.0;
-    K_a(5) = 6.0;
-    K_a(6) = 4.0;
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      M_a(static_cast<Eigen::Index>(i)) = ADMITTANCE_M_NOMINAL[i];
+      D_a(static_cast<Eigen::Index>(i)) = ADMITTANCE_D_NOMINAL[i] * damping_scale;
+      K_a(static_cast<Eigen::Index>(i)) = ADMITTANCE_K_NOMINAL[i];
+    }
 
     Eigen::VectorXd ddq_adm = Eigen::VectorXd::Zero(model.nv);
     for (int i = 0; i < model.nv; ++i)
     {
-      ddq_adm(i) =
-          (tau_ext(i) - D_a(i) * left_active_dq_adm(i) -
+      const double raw_ddq =
+          (ADMITTANCE_INPUT_GAIN_NOMINAL * tau_ext(i) -
+           D_a(i) * left_active_dq_adm(i) -
            K_a(i) * (left_active_q_adm(i) - q(i))) /
           M_a(i);
+      ddq_adm(i) = clampAbs(raw_ddq, ADMITTANCE_DDQ_LIMIT[static_cast<std::size_t>(i)]);
     }
 
     left_active_dq_adm = left_active_dq_adm + ddq_adm * dt;
@@ -927,15 +1073,13 @@ namespace upperlimb_robot
         30.0 * DEG2RAD, 30.0 * DEG2RAD, 30.0 * DEG2RAD,
         60.0 * DEG2RAD, 60.0 * DEG2RAD, 60.0 * DEG2RAD,
         120.0 * DEG2RAD};
-    const std::array<double, 7> dq_limit = {
-        1.0, 1.0, 1.0, 1.5, 1.5, 1.5, 1.5};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
       left_active_q_adm(static_cast<Eigen::Index>(i)) =
           clampBetween(left_active_q_adm(static_cast<Eigen::Index>(i)), q_min[i], q_max[i]);
       left_active_dq_adm(static_cast<Eigen::Index>(i)) =
-          clampAbs(left_active_dq_adm(static_cast<Eigen::Index>(i)), dq_limit[i]);
+          clampAbs(left_active_dq_adm(static_cast<Eigen::Index>(i)), ADMITTANCE_DQ_LIMIT[i]);
     }
 
     // 重力补偿与摩擦补偿（分开记录，求和与原公式完全等价）
@@ -953,21 +1097,11 @@ namespace upperlimb_robot
     Eigen::VectorXd Kp = Eigen::VectorXd::Zero(model.nv);
     Eigen::VectorXd Kv = Eigen::VectorXd::Zero(model.nv);
 
-    Kp(0) = 20.0;
-    Kp(1) = 20.0;
-    Kp(2) = 16.0;
-    Kp(3) = 18.0;
-    Kp(4) = 18.0;
-    Kp(5) = 16.0;
-    Kp(6) = 10.0;
-
-    Kv(0) = 4.0;
-    Kv(1) = 4.0;
-    Kv(2) = 3.0;
-    Kv(3) = 2.5;
-    Kv(4) = 2.5;
-    Kv(5) = 2.0;
-    Kv(6) = 1.5;
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      Kp(static_cast<Eigen::Index>(i)) = ADMITTANCE_KP_NOMINAL[i];
+      Kv(static_cast<Eigen::Index>(i)) = ADMITTANCE_KV_NOMINAL[i];
+    }
 
     Eigen::VectorXd tau_cmd =
         g + Kp.asDiagonal() * (left_active_q_adm - q) +
@@ -1231,22 +1365,17 @@ namespace upperlimb_robot
       return;
     }
 
-    // ===================== 导纳模型（使用实际控制周期 dt_s） =====================
+    // ===================== 导纳模型（基线定参导纳，使用实际控制周期 dt_s） =====================
     const double dt = clampControlDt(dt_s);
     const double damping_scale =
         getAdmittanceDampingScale(g_exp_params.admittance_damping_level);
-    const double admittance_input_gain = 1.5;
+    const double admittance_input_gain = ADMITTANCE_INPUT_GAIN_NOMINAL;
 
-    const std::array<double, 7> M_value = {
-        1.5, 1.5, 1.2, 0.65, 0.65, 0.50, 0.40};
-    const std::array<double, 7> D_value = {
-        22.0, 22.0, 18.0, 10.0, 10.0, 8.0, 6.0};
-    const std::array<double, 7> K_value = {
-        2.0, 2.0, 1.5, 0.8, 0.8, 0.5, 0.3};
-    const std::array<double, 7> Kp_value = {
-        20.0, 20.0, 16.0, 18.0, 18.0, 16.0, 10.0};
-    const std::array<double, 7> Kv_value = {
-        4.0, 4.0, 3.0, 2.5, 2.5, 2.0, 1.5};
+    const std::array<double, 7> &M_value = ADMITTANCE_M_NOMINAL;
+    const std::array<double, 7> &D_value = ADMITTANCE_D_NOMINAL;
+    const std::array<double, 7> &K_value = ADMITTANCE_K_NOMINAL;
+    const std::array<double, 7> &Kp_value = ADMITTANCE_KP_NOMINAL;
+    const std::array<double, 7> &Kv_value = ADMITTANCE_KV_NOMINAL;
 
     Eigen::VectorXd M_a = Eigen::VectorXd::Zero(model.nv);
     Eigen::VectorXd D_a = Eigen::VectorXd::Zero(model.nv);
@@ -1262,11 +1391,12 @@ namespace upperlimb_robot
     Eigen::VectorXd ddq_adm = Eigen::VectorXd::Zero(model.nv);
     for (int i = 0; i < model.nv; ++i)
     {
-      ddq_adm(i) =
+      const double raw_ddq =
           (admittance_input_gain * tau_ext(i) -
            D_a(i) * right_active_dq_adm(i) -
            K_a(i) * (right_active_q_adm(i) - q(i))) /
           M_a(i);
+      ddq_adm(i) = clampAbs(raw_ddq, ADMITTANCE_DDQ_LIMIT[static_cast<std::size_t>(i)]);
     }
 
     right_active_dq_adm = right_active_dq_adm + ddq_adm * dt;
@@ -1281,15 +1411,13 @@ namespace upperlimb_robot
         30.0 * DEG2RAD, 30.0 * DEG2RAD, 30.0 * DEG2RAD,
         60.0 * DEG2RAD, 60.0 * DEG2RAD, 60.0 * DEG2RAD,
         120.0 * DEG2RAD};
-    const std::array<double, 7> dq_limit = {
-        1.0, 1.0, 1.0, 1.5, 1.5, 1.5, 1.5};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
       right_active_q_adm(static_cast<Eigen::Index>(i)) =
           clampBetween(right_active_q_adm(static_cast<Eigen::Index>(i)), q_min[i], q_max[i]);
       right_active_dq_adm(static_cast<Eigen::Index>(i)) =
-          clampAbs(right_active_dq_adm(static_cast<Eigen::Index>(i)), dq_limit[i]);
+          clampAbs(right_active_dq_adm(static_cast<Eigen::Index>(i)), ADMITTANCE_DQ_LIMIT[i]);
     }
 
     // 统一重力补偿与摩擦补偿
@@ -2357,6 +2485,37 @@ namespace upperlimb_robot
     output.target_smooth_time[9] = 25;
   }
 
+  // ===================== 双臂同步恢复初始位姿（MODE_BILATERAL_PRESET_POSITION = 20） =====================
+  // 严格复用未改动的 runLeftPresetPosition 与 runRightPresetPosition，同时驱动双侧回到初始姿态
+  void runBilateralPresetPosition(const MotorStateCache &state, ControlOutputCache &output)
+  {
+    ControlOutputCache left_out{};
+    ControlOutputCache right_out{};
+    runLeftPresetPosition(state, left_out);
+    runRightPresetPosition(state, right_out);
+
+    output = ControlOutputCache{};
+    for (std::size_t i = 0; i < 10; ++i)
+    {
+      output.use_position[i] = right_out.use_position[i];
+      output.target_position[i] = right_out.target_position[i];
+      output.target_velocity[i] = right_out.target_velocity[i];
+      output.target_acc[i] = right_out.target_acc[i];
+      output.target_dec[i] = right_out.target_dec[i];
+      output.target_smooth_time[i] = right_out.target_smooth_time[i];
+    }
+    for (std::size_t i = 10; i < AXIS_NUM; ++i)
+    {
+      output.use_position[i] = left_out.use_position[i];
+      output.target_position[i] = left_out.target_position[i];
+      output.target_velocity[i] = left_out.target_velocity[i];
+      output.target_acc[i] = left_out.target_acc[i];
+      output.target_dec[i] = left_out.target_dec[i];
+      output.target_smooth_time[i] = left_out.target_smooth_time[i];
+    }
+    output.valid = left_out.valid && right_out.valid;
+  }
+
   // ===================== 左臂正弦被动跟踪模式（PID，MODE_PASSIVE = 5） =====================
   //
   // 防跳变最小改动说明：
@@ -3021,7 +3180,7 @@ namespace upperlimb_robot
       return;
     }
 
-    // 关节空间导纳参数（支持三档阻尼预设）
+    // 关节空间导纳参数（基线定参导纳，支持三档阻尼预设）
     const double damping_scale =
         getAdmittanceDampingScale(g_exp_params.admittance_damping_level);
 
@@ -3029,9 +3188,9 @@ namespace upperlimb_robot
     Eigen::VectorXd D_a = Eigen::VectorXd::Zero(model.nv);
     Eigen::VectorXd K_a = Eigen::VectorXd::Zero(model.nv);
 
-    const std::array<double, 7> M_value = {4.0, 4.0, 3.0, 1.0, 1.0, 1.0, 0.5};
-    const std::array<double, 7> D_value = {45.0, 45.0, 35.0, 20.0, 20.0, 18.0, 12.0};
-    const std::array<double, 7> K_value = {18.0, 18.0, 14.0, 8.0, 8.0, 6.0, 4.0};
+    const std::array<double, 7> &M_value = ADMITTANCE_M_NOMINAL;
+    const std::array<double, 7> &D_value = ADMITTANCE_D_NOMINAL;
+    const std::array<double, 7> &K_value = ADMITTANCE_K_NOMINAL;
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -3045,7 +3204,7 @@ namespace upperlimb_robot
     }
 
     Eigen::VectorXd ddq_adm = Eigen::VectorXd::Zero(model.nv);
-    const std::array<double, 7> ddq_limit_value = {5.0, 5.0, 5.0, 8.0, 8.0, 8.0, 8.0};
+    const std::array<double, 7> &ddq_limit_value = ADMITTANCE_DDQ_LIMIT;
 
     for (int i = 0; i < model.nv; ++i)
     {
@@ -3056,7 +3215,7 @@ namespace upperlimb_robot
       }
 
       ddq_adm(i) =
-          (tau_ext(i) -
+          (ADMITTANCE_INPUT_GAIN_NOMINAL * tau_ext(i) -
            D_a(i) * bilateral_active_dq_adm(i) -
            K_a(i) * (bilateral_active_q_adm(i) - q(i))) /
           M_a(i);
@@ -3125,8 +3284,8 @@ namespace upperlimb_robot
     Eigen::VectorXd Kp = Eigen::VectorXd::Zero(model.nv);
     Eigen::VectorXd Kv = Eigen::VectorXd::Zero(model.nv);
 
-    const std::array<double, 7> Kp_value = {20.0, 20.0, 16.0, 15.0, 15.0, 13.0, 8.0};
-    const std::array<double, 7> Kv_value = {4.0, 4.0, 3.0, 2.5, 2.5, 2.0, 1.5};
+    const std::array<double, 7> &Kp_value = ADMITTANCE_KP_NOMINAL;
+    const std::array<double, 7> &Kv_value = ADMITTANCE_KV_NOMINAL;
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -3203,6 +3362,836 @@ namespace upperlimb_robot
       std::cout << "[runBilateralActiveMode] damping_scale=" << damping_scale
                 << " dt=" << dt
                 << " fault=" << bilateral_active_fault_counter
+                << std::endl;
+    }
+
+    output.valid = true;
+  }
+
+  // ===================== 左臂创新主动对照：意图自适应变阻尼-按需助力导纳（MODE_LEFT_ADAPTIVE_ACTIVE = 21） =====================
+  void runLeftAdaptiveActiveMode(
+      const MotorStateCache &state,
+      const SensorStateCache &sensor_state,
+      double dt_s,
+      ControlOutputCache &output,
+      AlgorithmDiagData *diag)
+  {
+    output = ControlOutputCache{};
+    output.valid = false;
+
+    static bool pin_initialized = false;
+    static bool pin_init_failed = false;
+    static pinocchio::Model model;
+    static std::unique_ptr<pinocchio::Data> data;
+    static pinocchio::FrameIndex frame_id_arm = 0;
+    static pinocchio::FrameIndex frame_id_hand = 0;
+
+    if (!pin_initialized && !pin_init_failed)
+    {
+      try
+      {
+        const std::string urdf_path =
+            ament_index_cpp::get_package_share_directory("upperlimb_robot") +
+            "/urdf/left_arm_experiment.urdf";
+        pinocchio::urdf::buildModel(urdf_path, model);
+        data = std::make_unique<pinocchio::Data>(model);
+        frame_id_arm = model.getFrameId("ft_sensor_frame");
+        frame_id_hand = model.getFrameId("ft_sensor_frame_2");
+
+        if (frame_id_arm >= model.frames.size() || frame_id_hand >= model.frames.size() ||
+            model.nq < 7 || model.nv < 7)
+        {
+          pin_init_failed = true;
+          std::cerr << "[runLeftAdaptiveActiveMode] Pinocchio 模型/frame 校验失败" << std::endl;
+        }
+        else
+        {
+          pin_initialized = true;
+          std::cout << "[runLeftAdaptiveActiveMode] Pinocchio 初始化成功。 urdf_path="
+                    << urdf_path << " nq=" << model.nq << " nv=" << model.nv << std::endl;
+        }
+      }
+      catch (const std::exception &e)
+      {
+        pin_init_failed = true;
+        std::cerr << "[runLeftAdaptiveActiveMode] Pinocchio 初始化异常: " << e.what() << std::endl;
+      }
+    }
+
+    if (!pin_initialized || !sensor_state.valid)
+    {
+      output.valid = false;
+      return;
+    }
+
+    constexpr double DEG2RAD = M_PI / 180.0;
+    constexpr double RAD2DEG = 180.0 / M_PI;
+    const std::array<std::size_t, 7> left_ctrl_id = {10, 11, 12, 13, 14, 15, 16};
+
+    Eigen::VectorXd q = Eigen::VectorXd::Zero(model.nq);
+    Eigen::VectorXd v = Eigen::VectorXd::Zero(model.nv);
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      q(static_cast<Eigen::Index>(i)) = state.position[left_ctrl_id[i]] * DEG2RAD;
+      v(static_cast<Eigen::Index>(i)) = state.velocity[left_ctrl_id[i]] * DEG2RAD;
+    }
+
+    if (!left_ivda_initialized || left_ivda_q_adm.size() != model.nq || left_ivda_dq_adm.size() != model.nv)
+    {
+      left_ivda_q_adm = q;
+      left_ivda_dq_adm = Eigen::VectorXd::Zero(model.nv);
+      left_ivda_power_filt.fill(0.0);
+      left_ivda_tau_abs_filt.fill(0.0);
+      left_ivda_initialized = true;
+    }
+
+    const auto &raw_arm = sensor_state.sensor[SENSOR_LEFT_ARM];
+    const auto &bias_arm = sensor_state.bias[SENSOR_LEFT_ARM];
+    const auto &raw_hand = sensor_state.sensor[SENSOR_LEFT_HAND];
+    const auto &bias_hand = sensor_state.bias[SENSOR_LEFT_HAND];
+
+    ForceSensorData arm_w{
+        raw_arm.fx - bias_arm.fx, raw_arm.fy - bias_arm.fy, raw_arm.fz - bias_arm.fz,
+        raw_arm.mx - bias_arm.mx, raw_arm.my - bias_arm.my, raw_arm.mz - bias_arm.mz};
+    ForceSensorData hand_w{
+        raw_hand.fx - bias_hand.fx, raw_hand.fy - bias_hand.fy, raw_hand.fz - bias_hand.fz,
+        raw_hand.mx - bias_hand.mx, raw_hand.my - bias_hand.my, raw_hand.mz - bias_hand.mz};
+
+    const double force_deadzone = 1.0;
+    const double torque_deadzone = 0.05;
+    auto filter_wrench = [&](ForceSensorData &w)
+    {
+      w.fx = applyDeadzone(w.fx, force_deadzone);
+      w.fy = applyDeadzone(w.fy, force_deadzone);
+      w.fz = applyDeadzone(w.fz, force_deadzone);
+      w.mx = applyDeadzone(w.mx, torque_deadzone);
+      w.my = applyDeadzone(w.my, torque_deadzone);
+      w.mz = applyDeadzone(w.mz, torque_deadzone);
+    };
+    filter_wrench(arm_w);
+    filter_wrench(hand_w);
+    applyUpperArmSensorWorldAxisGains(arm_w);
+
+    bool ft_sat = false;
+    ft_sat |= clampWrenchWithFlag(arm_w, 80.0, 8.0);
+    ft_sat |= clampWrenchWithFlag(hand_w, 80.0, 8.0);
+
+    Eigen::MatrixXd J_arm = Eigen::MatrixXd::Zero(6, model.nv);
+    Eigen::MatrixXd J_hand = Eigen::MatrixXd::Zero(6, model.nv);
+    pinocchio::computeFrameJacobian(model, *data, q, frame_id_arm, pinocchio::LOCAL, J_arm);
+    pinocchio::computeFrameJacobian(model, *data, q, frame_id_hand, pinocchio::LOCAL, J_hand);
+
+    pinocchio::Force f_arm = pinocchio::Force::Zero();
+    f_arm.linear() << arm_w.fx, arm_w.fy, arm_w.fz;
+    f_arm.angular() << arm_w.mx, arm_w.my, arm_w.mz;
+
+    pinocchio::Force f_hand = pinocchio::Force::Zero();
+    f_hand.linear() << hand_w.fx, hand_w.fy, hand_w.fz;
+    f_hand.angular() << hand_w.mx, hand_w.my, hand_w.mz;
+
+    Eigen::VectorXd tau_ext =
+        J_arm.transpose() * f_arm.toVector() +
+        J_hand.transpose() * f_hand.toVector();
+
+    const double dt = clampControlDt(dt_s);
+    const double damping_scale =
+        getAdmittanceDampingScale(g_exp_params.admittance_damping_level);
+
+    Eigen::VectorXd ddq_adm = Eigen::VectorXd::Zero(model.nv);
+    Eigen::VectorXd tau_aan = Eigen::VectorXd::Zero(model.nv);
+
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      const Eigen::Index ei = static_cast<Eigen::Index>(i);
+      const double d0_i = ADMITTANCE_D_NOMINAL[i] * damping_scale;
+      const double k0_i = ADMITTANCE_K_NOMINAL[i];
+      const IvdaJointStepOutput ivda = computeIvdaAdaptiveTerms(
+          i, tau_ext(ei), left_ivda_dq_adm(ei), d0_i, k0_i, dt,
+          left_ivda_power_filt[i], left_ivda_tau_abs_filt[i]);
+
+      const double raw_ddq =
+          (ADMITTANCE_INPUT_GAIN_NOMINAL * tau_ext(ei) -
+           ivda.d_eff * left_ivda_dq_adm(ei) -
+           ivda.k_eff * (left_ivda_q_adm(ei) - q(ei))) /
+          ADMITTANCE_M_NOMINAL[i];
+      ddq_adm(ei) = clampAbs(raw_ddq, ADMITTANCE_DDQ_LIMIT[i]);
+      tau_aan(ei) = ivda.tau_aan;
+    }
+
+    left_ivda_dq_adm = left_ivda_dq_adm + ddq_adm * dt;
+    left_ivda_q_adm = left_ivda_q_adm + left_ivda_dq_adm * dt;
+
+    const std::array<double, 7> q_min = {
+        -30.0 * DEG2RAD, -30.0 * DEG2RAD, -30.0 * DEG2RAD,
+        -60.0 * DEG2RAD, -60.0 * DEG2RAD, -60.0 * DEG2RAD,
+        0.0 * DEG2RAD};
+    const std::array<double, 7> q_max = {
+        30.0 * DEG2RAD, 30.0 * DEG2RAD, 30.0 * DEG2RAD,
+        60.0 * DEG2RAD, 60.0 * DEG2RAD, 60.0 * DEG2RAD,
+        120.0 * DEG2RAD};
+
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      const Eigen::Index ei = static_cast<Eigen::Index>(i);
+      left_ivda_q_adm(ei) = clampBetween(left_ivda_q_adm(ei), q_min[i], q_max[i]);
+      left_ivda_dq_adm(ei) = clampAbs(left_ivda_dq_adm(ei), ADMITTANCE_DQ_LIMIT[i]);
+    }
+
+    Eigen::VectorXd tau_grav = pinocchio::computeGeneralizedGravity(model, *data, q);
+    applyArmGravityCompensation(tau_grav, SINGLE_ARM_V_IDS, LEFT_ARM_GRAVITY_COMPENSATION);
+
+    Eigen::VectorXd tau_fric = Eigen::VectorXd::Zero(model.nv);
+    addArmFrictionCompensation(tau_fric, v, SINGLE_ARM_V_IDS, LEFT_ARM_FRICTION_COMPENSATION);
+
+    Eigen::VectorXd Kp = Eigen::VectorXd::Zero(model.nv);
+    Eigen::VectorXd Kv = Eigen::VectorXd::Zero(model.nv);
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      Kp(static_cast<Eigen::Index>(i)) = ADMITTANCE_KP_NOMINAL[i];
+      Kv(static_cast<Eigen::Index>(i)) = ADMITTANCE_KV_NOMINAL[i];
+    }
+
+    Eigen::VectorXd tau_cmd =
+        tau_grav + tau_fric +
+        Kp.asDiagonal() * (left_ivda_q_adm - q) +
+        Kv.asDiagonal() * (left_ivda_dq_adm - v) +
+        tau_aan;
+
+    if (!tau_cmd.allFinite())
+    {
+      resetLeftAdaptiveActiveMode();
+      output.valid = false;
+      return;
+    }
+
+    const std::array<double, 7> torque_limit = {
+        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      const Eigen::Index ei = static_cast<Eigen::Index>(i);
+      double t_i = tau_cmd(ei);
+      const bool sat = clampAbsWithFlag(t_i, torque_limit[i]);
+
+      const std::size_t idx = left_ctrl_id[i];
+      output.use_torque[idx] = true;
+      output.target_torque[idx] = t_i;
+
+      if (diag != nullptr)
+      {
+        diag->qd_deg[idx] = left_ivda_q_adm(ei) * RAD2DEG;
+        diag->qa_deg[idx] = left_ivda_q_adm(ei) * RAD2DEG;
+        diag->dqa_deg_s[idx] = left_ivda_dq_adm(ei) * RAD2DEG;
+        diag->ddqa_deg_s2[idx] = ddq_adm(ei) * RAD2DEG;
+        diag->tau_int_nm[idx] = tau_ext(ei);
+        diag->tau_grav_nm[idx] = tau_grav(ei);
+        diag->tau_fric_nm[idx] = tau_fric(ei);
+        diag->saturated[idx] = sat;
+      }
+    }
+
+    if (diag != nullptr)
+    {
+      diag->proc_ft[SENSOR_LEFT_ARM] = arm_w;
+      diag->proc_ft[SENSOR_LEFT_HAND] = hand_w;
+      diag->ft_saturated = ft_sat;
+    }
+
+    output.valid = true;
+  }
+
+  // ===================== 右臂创新主动对照：意图自适应变阻尼-按需助力导纳（MODE_RIGHT_ADAPTIVE_ACTIVE = 22） =====================
+  void runRightAdaptiveActiveMode(
+      const MotorStateCache &state,
+      const SensorStateCache &sensor_state,
+      double dt_s,
+      ControlOutputCache &output,
+      AlgorithmDiagData *diag)
+  {
+    output = ControlOutputCache{};
+    output.valid = false;
+
+    static bool pin_initialized = false;
+    static bool pin_init_failed = false;
+    static pinocchio::Model model;
+    static std::unique_ptr<pinocchio::Data> data;
+    static pinocchio::FrameIndex frame_id_arm = 0;
+    static pinocchio::FrameIndex frame_id_hand = 0;
+
+    if (!pin_initialized && !pin_init_failed)
+    {
+      try
+      {
+        const std::string urdf_path =
+            ament_index_cpp::get_package_share_directory("upperlimb_robot") +
+            "/urdf/right_arm_experiment.urdf";
+        pinocchio::urdf::buildModel(urdf_path, model);
+        data = std::make_unique<pinocchio::Data>(model);
+        frame_id_arm = model.getFrameId("ft_rightsensor_frame");
+        frame_id_hand = model.getFrameId("ft_rightsensor_frame_2");
+
+        if (frame_id_arm >= model.frames.size() || frame_id_hand >= model.frames.size() ||
+            model.nq < 7 || model.nv < 7)
+        {
+          pin_init_failed = true;
+          std::cerr << "[runRightAdaptiveActiveMode] Pinocchio 模型/frame 校验失败" << std::endl;
+        }
+        else
+        {
+          pin_initialized = true;
+          std::cout << "[runRightAdaptiveActiveMode] Pinocchio 初始化成功。 urdf_path="
+                    << urdf_path << " nq=" << model.nq << " nv=" << model.nv << std::endl;
+        }
+      }
+      catch (const std::exception &e)
+      {
+        pin_init_failed = true;
+        std::cerr << "[runRightAdaptiveActiveMode] Pinocchio 初始化异常: " << e.what() << std::endl;
+      }
+    }
+
+    if (!pin_initialized || !sensor_state.valid)
+    {
+      output.valid = false;
+      return;
+    }
+
+    constexpr double DEG2RAD = M_PI / 180.0;
+    constexpr double RAD2DEG = 180.0 / M_PI;
+    const std::array<std::size_t, 7> right_ctrl_id = {0, 1, 2, 3, 4, 5, 6};
+
+    Eigen::VectorXd q = Eigen::VectorXd::Zero(model.nq);
+    Eigen::VectorXd v = Eigen::VectorXd::Zero(model.nv);
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      q(static_cast<Eigen::Index>(i)) = state.position[right_ctrl_id[i]] * DEG2RAD;
+      v(static_cast<Eigen::Index>(i)) = state.velocity[right_ctrl_id[i]] * DEG2RAD;
+    }
+
+    if (!right_ivda_initialized || right_ivda_q_adm.size() != model.nq || right_ivda_dq_adm.size() != model.nv)
+    {
+      right_ivda_q_adm = q;
+      right_ivda_dq_adm = Eigen::VectorXd::Zero(model.nv);
+      right_ivda_power_filt.fill(0.0);
+      right_ivda_tau_abs_filt.fill(0.0);
+      right_ivda_initialized = true;
+    }
+
+    const auto &raw_arm = sensor_state.sensor[SENSOR_RIGHT_ARM];
+    const auto &bias_arm = sensor_state.bias[SENSOR_RIGHT_ARM];
+    const auto &raw_hand = sensor_state.sensor[SENSOR_RIGHT_HAND];
+    const auto &bias_hand = sensor_state.bias[SENSOR_RIGHT_HAND];
+
+    ForceSensorData arm_w{
+        raw_arm.fx - bias_arm.fx, raw_arm.fy - bias_arm.fy, raw_arm.fz - bias_arm.fz,
+        raw_arm.mx - bias_arm.mx, raw_arm.my - bias_arm.my, raw_arm.mz - bias_arm.mz};
+    ForceSensorData hand_w{
+        raw_hand.fx - bias_hand.fx, raw_hand.fy - bias_hand.fy, raw_hand.fz - bias_hand.fz,
+        raw_hand.mx - bias_hand.mx, raw_hand.my - bias_hand.my, raw_hand.mz - bias_hand.mz};
+
+    const double force_deadzone = 1.0;
+    const double torque_deadzone = 0.05;
+    auto filter_wrench = [&](ForceSensorData &w)
+    {
+      w.fx = applyDeadzone(w.fx, force_deadzone);
+      w.fy = applyDeadzone(w.fy, force_deadzone);
+      w.fz = applyDeadzone(w.fz, force_deadzone);
+      w.mx = applyDeadzone(w.mx, torque_deadzone);
+      w.my = applyDeadzone(w.my, torque_deadzone);
+      w.mz = applyDeadzone(w.mz, torque_deadzone);
+    };
+    filter_wrench(arm_w);
+    filter_wrench(hand_w);
+    applyUpperArmSensorWorldAxisGains(arm_w);
+
+    bool ft_sat = false;
+    ft_sat |= clampWrenchWithFlag(arm_w, 80.0, 8.0);
+    ft_sat |= clampWrenchWithFlag(hand_w, 80.0, 8.0);
+
+    Eigen::MatrixXd J_arm = Eigen::MatrixXd::Zero(6, model.nv);
+    Eigen::MatrixXd J_hand = Eigen::MatrixXd::Zero(6, model.nv);
+    pinocchio::computeFrameJacobian(model, *data, q, frame_id_arm, pinocchio::LOCAL, J_arm);
+    pinocchio::computeFrameJacobian(model, *data, q, frame_id_hand, pinocchio::LOCAL, J_hand);
+
+    pinocchio::Force f_arm = pinocchio::Force::Zero();
+    f_arm.linear() << arm_w.fx, arm_w.fy, arm_w.fz;
+    f_arm.angular() << arm_w.mx, arm_w.my, arm_w.mz;
+
+    pinocchio::Force f_hand = pinocchio::Force::Zero();
+    f_hand.linear() << hand_w.fx, hand_w.fy, hand_w.fz;
+    f_hand.angular() << hand_w.mx, hand_w.my, hand_w.mz;
+
+    Eigen::VectorXd tau_ext =
+        J_arm.transpose() * f_arm.toVector() +
+        J_hand.transpose() * f_hand.toVector();
+
+    const double dt = clampControlDt(dt_s);
+    const double damping_scale =
+        getAdmittanceDampingScale(g_exp_params.admittance_damping_level);
+
+    Eigen::VectorXd ddq_adm = Eigen::VectorXd::Zero(model.nv);
+    Eigen::VectorXd tau_aan = Eigen::VectorXd::Zero(model.nv);
+
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      const Eigen::Index ei = static_cast<Eigen::Index>(i);
+      const double d0_i = ADMITTANCE_D_NOMINAL[i] * damping_scale;
+      const double k0_i = ADMITTANCE_K_NOMINAL[i];
+      const IvdaJointStepOutput ivda = computeIvdaAdaptiveTerms(
+          i, tau_ext(ei), right_ivda_dq_adm(ei), d0_i, k0_i, dt,
+          right_ivda_power_filt[i], right_ivda_tau_abs_filt[i]);
+
+      const double raw_ddq =
+          (ADMITTANCE_INPUT_GAIN_NOMINAL * tau_ext(ei) -
+           ivda.d_eff * right_ivda_dq_adm(ei) -
+           ivda.k_eff * (right_ivda_q_adm(ei) - q(ei))) /
+          ADMITTANCE_M_NOMINAL[i];
+      ddq_adm(ei) = clampAbs(raw_ddq, ADMITTANCE_DDQ_LIMIT[i]);
+      tau_aan(ei) = ivda.tau_aan;
+    }
+
+    right_ivda_dq_adm = right_ivda_dq_adm + ddq_adm * dt;
+    right_ivda_q_adm = right_ivda_q_adm + right_ivda_dq_adm * dt;
+
+    const std::array<double, 7> q_min = {
+        -30.0 * DEG2RAD, -30.0 * DEG2RAD, -30.0 * DEG2RAD,
+        -60.0 * DEG2RAD, -60.0 * DEG2RAD, -60.0 * DEG2RAD,
+        0.0 * DEG2RAD};
+    const std::array<double, 7> q_max = {
+        30.0 * DEG2RAD, 30.0 * DEG2RAD, 30.0 * DEG2RAD,
+        60.0 * DEG2RAD, 60.0 * DEG2RAD, 60.0 * DEG2RAD,
+        120.0 * DEG2RAD};
+
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      const Eigen::Index ei = static_cast<Eigen::Index>(i);
+      right_ivda_q_adm(ei) = clampBetween(right_ivda_q_adm(ei), q_min[i], q_max[i]);
+      right_ivda_dq_adm(ei) = clampAbs(right_ivda_dq_adm(ei), ADMITTANCE_DQ_LIMIT[i]);
+    }
+
+    Eigen::VectorXd tau_grav = pinocchio::computeGeneralizedGravity(model, *data, q);
+    applyArmGravityCompensation(tau_grav, SINGLE_ARM_V_IDS, RIGHT_ARM_GRAVITY_COMPENSATION);
+
+    Eigen::VectorXd tau_fric = Eigen::VectorXd::Zero(model.nv);
+    addArmFrictionCompensation(tau_fric, v, SINGLE_ARM_V_IDS, RIGHT_ARM_FRICTION_COMPENSATION);
+
+    Eigen::VectorXd Kp = Eigen::VectorXd::Zero(model.nv);
+    Eigen::VectorXd Kv = Eigen::VectorXd::Zero(model.nv);
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      Kp(static_cast<Eigen::Index>(i)) = ADMITTANCE_KP_NOMINAL[i];
+      Kv(static_cast<Eigen::Index>(i)) = ADMITTANCE_KV_NOMINAL[i];
+    }
+
+    Eigen::VectorXd tau_cmd =
+        tau_grav + tau_fric +
+        Kp.asDiagonal() * (right_ivda_q_adm - q) +
+        Kv.asDiagonal() * (right_ivda_dq_adm - v) +
+        tau_aan;
+
+    if (!tau_cmd.allFinite())
+    {
+      resetRightAdaptiveActiveMode();
+      output.valid = false;
+      return;
+    }
+
+    const std::array<double, 7> torque_limit = {
+        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+
+    // 右臂保持 -1.0 驱动方向映射
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      const Eigen::Index ei = static_cast<Eigen::Index>(i);
+      double t_out = -tau_cmd(ei);
+      const bool sat = clampAbsWithFlag(t_out, torque_limit[i]);
+
+      const std::size_t idx = right_ctrl_id[i];
+      output.use_torque[idx] = true;
+      output.target_torque[idx] = t_out;
+
+      if (diag != nullptr)
+      {
+        diag->qd_deg[idx] = right_ivda_q_adm(ei) * RAD2DEG;
+        diag->qa_deg[idx] = right_ivda_q_adm(ei) * RAD2DEG;
+        diag->dqa_deg_s[idx] = right_ivda_dq_adm(ei) * RAD2DEG;
+        diag->ddqa_deg_s2[idx] = ddq_adm(ei) * RAD2DEG;
+        diag->tau_int_nm[idx] = tau_ext(ei);
+        diag->tau_grav_nm[idx] = tau_grav(ei);
+        diag->tau_fric_nm[idx] = tau_fric(ei);
+        diag->saturated[idx] = sat;
+      }
+    }
+
+    if (diag != nullptr)
+    {
+      diag->proc_ft[SENSOR_RIGHT_ARM] = arm_w;
+      diag->proc_ft[SENSOR_RIGHT_HAND] = hand_w;
+      diag->ft_saturated = ft_sat;
+    }
+
+    output.valid = true;
+  }
+
+  // ===================== 双侧创新主动对照：双臂意图自适应变阻尼-按需助力导纳（MODE_BILATERAL_ADAPTIVE_ACTIVE = 23） =====================
+  void runBilateralAdaptiveActiveMode(
+      const MotorStateCache &state,
+      const SensorStateCache &sensor_state,
+      double dt_s,
+      ControlOutputCache &output,
+      AlgorithmDiagData *diag)
+  {
+    output = ControlOutputCache{};
+    output.valid = false;
+
+    if (!sensor_state.valid)
+    {
+      output.valid = false;
+      return;
+    }
+
+    constexpr double DEG2RAD = M_PI / 180.0;
+    constexpr double RAD2DEG = 180.0 / M_PI;
+    const double dt = clampControlDt(dt_s);
+
+    const std::array<std::size_t, 7> left_ctrl_id = {10, 11, 12, 13, 14, 15, 16};
+    const std::array<std::size_t, 7> right_ctrl_id = {0, 1, 2, 3, 4, 5, 6};
+
+    auto reset_ivda_to_current = [&](const Eigen::VectorXd &q_now)
+    {
+      bilateral_ivda_q_adm = q_now;
+      bilateral_ivda_dq_adm = Eigen::VectorXd::Zero(q_now.size());
+      bilateral_ivda_left_power_filt.fill(0.0);
+      bilateral_ivda_left_tau_abs_filt.fill(0.0);
+      bilateral_ivda_right_power_filt.fill(0.0);
+      bilateral_ivda_right_tau_abs_filt.fill(0.0);
+      bilateral_ivda_initialized = true;
+    };
+
+    static bool pin_initialized = false;
+    static bool pin_init_failed = false;
+    static pinocchio::Model model;
+    static std::unique_ptr<pinocchio::Data> data;
+    static pinocchio::FrameIndex left_frame_id_arm = 0;
+    static pinocchio::FrameIndex left_frame_id_hand = 0;
+    static pinocchio::FrameIndex right_frame_id_arm = 0;
+    static pinocchio::FrameIndex right_frame_id_hand = 0;
+    static std::array<int, 7> left_q_id = {-1, -1, -1, -1, -1, -1, -1};
+    static std::array<int, 7> left_v_id = {-1, -1, -1, -1, -1, -1, -1};
+    static std::array<int, 7> right_q_id = {-1, -1, -1, -1, -1, -1, -1};
+    static std::array<int, 7> right_v_id = {-1, -1, -1, -1, -1, -1, -1};
+
+    if (!pin_initialized && !pin_init_failed)
+    {
+      try
+      {
+        const std::string urdf_path =
+            ament_index_cpp::get_package_share_directory("upperlimb_robot") +
+            "/urdf/robot_arms.urdf";
+        pinocchio::urdf::buildModel(urdf_path, model);
+        data = std::make_unique<pinocchio::Data>(model);
+
+        left_frame_id_arm = model.getFrameId("ft_sensor_frame");
+        right_frame_id_arm = model.getFrameId("ft_rightsensor_frame");
+        left_frame_id_hand = model.getFrameId("ft_sensor_frame_2");
+        right_frame_id_hand = model.getFrameId("ft_rightsensor_frame_2");
+
+        auto load_joint_index = [&](const std::string &joint_name, int &q_id, int &v_id) -> bool
+        {
+          const pinocchio::JointIndex jid = model.getJointId(joint_name);
+          if (jid >= model.joints.size())
+          {
+            return false;
+          }
+          q_id = model.joints[jid].idx_q();
+          v_id = model.joints[jid].idx_v();
+          return (q_id >= 0 && q_id < model.nq && v_id >= 0 && v_id < model.nv);
+        };
+
+        bool ok = true;
+        for (int k = 0; k < 7; ++k)
+        {
+          ok = ok && load_joint_index("joint" + std::to_string(k + 1), left_q_id[k], left_v_id[k]);
+          ok = ok && load_joint_index("joint" + std::to_string(k + 11), right_q_id[k], right_v_id[k]);
+        }
+        ok = ok && (left_frame_id_arm < model.frames.size()) &&
+             (left_frame_id_hand < model.frames.size()) &&
+             (right_frame_id_arm < model.frames.size()) &&
+             (right_frame_id_hand < model.frames.size());
+
+        if (!ok)
+        {
+          pin_init_failed = true;
+          std::cerr << "[runBilateralAdaptiveActiveMode] Pinocchio 模型索引校验失败" << std::endl;
+        }
+        else
+        {
+          pin_initialized = true;
+          std::cout << "[runBilateralAdaptiveActiveMode] 双臂 IVDA 初始化成功。 urdf_path="
+                    << urdf_path << " nq=" << model.nq << " nv=" << model.nv << std::endl;
+        }
+      }
+      catch (const std::exception &e)
+      {
+        pin_init_failed = true;
+        std::cerr << "[runBilateralAdaptiveActiveMode] Pinocchio 初始化异常: " << e.what() << std::endl;
+      }
+    }
+
+    if (!pin_initialized)
+    {
+      output.valid = false;
+      return;
+    }
+
+    Eigen::VectorXd q = Eigen::VectorXd::Zero(model.nq);
+    Eigen::VectorXd v = Eigen::VectorXd::Zero(model.nv);
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      q(left_q_id[i]) = state.position[left_ctrl_id[i]] * DEG2RAD;
+      v(left_v_id[i]) = state.velocity[left_ctrl_id[i]] * DEG2RAD;
+      q(right_q_id[i]) = state.position[right_ctrl_id[i]] * DEG2RAD;
+      v(right_v_id[i]) = state.velocity[right_ctrl_id[i]] * DEG2RAD;
+    }
+
+    if (!q.allFinite() || !v.allFinite())
+    {
+      bilateral_ivda_fault_counter++;
+      output.valid = false;
+      return;
+    }
+
+    if (!bilateral_ivda_initialized ||
+        bilateral_ivda_q_adm.size() != model.nq ||
+        bilateral_ivda_dq_adm.size() != model.nv)
+    {
+      reset_ivda_to_current(q);
+    }
+
+    auto read_wrench = [&](int sid) -> ForceSensorData
+    {
+      const auto &raw = sensor_state.sensor[sid];
+      const auto &bias = sensor_state.bias[sid];
+      return {
+          raw.fx - bias.fx, raw.fy - bias.fy, raw.fz - bias.fz,
+          raw.mx - bias.mx, raw.my - bias.my, raw.mz - bias.mz};
+    };
+
+    ForceSensorData left_arm = read_wrench(SENSOR_LEFT_ARM);
+    ForceSensorData left_hand = read_wrench(SENSOR_LEFT_HAND);
+    ForceSensorData right_arm = read_wrench(SENSOR_RIGHT_ARM);
+    ForceSensorData right_hand = read_wrench(SENSOR_RIGHT_HAND);
+
+    const double force_deadzone = 1.0;
+    const double torque_deadzone = 0.05;
+    bool ft_sat = false;
+    auto process_wrench = [&](ForceSensorData &w, bool is_upper_arm)
+    {
+      w.fx = applyDeadzone(w.fx, force_deadzone);
+      w.fy = applyDeadzone(w.fy, force_deadzone);
+      w.fz = applyDeadzone(w.fz, force_deadzone);
+      w.mx = applyDeadzone(w.mx, torque_deadzone);
+      w.my = applyDeadzone(w.my, torque_deadzone);
+      w.mz = applyDeadzone(w.mz, torque_deadzone);
+      if (is_upper_arm)
+      {
+        applyUpperArmSensorWorldAxisGains(w);
+      }
+      ft_sat |= clampWrenchWithFlag(w, 80.0, 8.0);
+    };
+
+    process_wrench(left_arm, true);
+    process_wrench(left_hand, false);
+    process_wrench(right_arm, true);
+    process_wrench(right_hand, false);
+
+    Eigen::MatrixXd J_left_arm = Eigen::MatrixXd::Zero(6, model.nv);
+    Eigen::MatrixXd J_left_hand = Eigen::MatrixXd::Zero(6, model.nv);
+    Eigen::MatrixXd J_right_arm = Eigen::MatrixXd::Zero(6, model.nv);
+    Eigen::MatrixXd J_right_hand = Eigen::MatrixXd::Zero(6, model.nv);
+
+    pinocchio::computeFrameJacobian(model, *data, q, left_frame_id_arm, pinocchio::LOCAL, J_left_arm);
+    pinocchio::computeFrameJacobian(model, *data, q, left_frame_id_hand, pinocchio::LOCAL, J_left_hand);
+    pinocchio::computeFrameJacobian(model, *data, q, right_frame_id_arm, pinocchio::LOCAL, J_right_arm);
+    pinocchio::computeFrameJacobian(model, *data, q, right_frame_id_hand, pinocchio::LOCAL, J_right_hand);
+
+    auto make_force = [](const ForceSensorData &w) -> pinocchio::Force
+    {
+      pinocchio::Force f = pinocchio::Force::Zero();
+      f.linear() << w.fx, w.fy, w.fz;
+      f.angular() << w.mx, w.my, w.mz;
+      return f;
+    };
+
+    Eigen::VectorXd tau_ext =
+        J_left_arm.transpose() * make_force(left_arm).toVector() +
+        J_left_hand.transpose() * make_force(left_hand).toVector() +
+        J_right_arm.transpose() * make_force(right_arm).toVector() +
+        J_right_hand.transpose() * make_force(right_hand).toVector();
+
+    if (!tau_ext.allFinite())
+    {
+      bilateral_ivda_fault_counter++;
+      reset_ivda_to_current(q);
+      output.valid = false;
+      return;
+    }
+
+    const double damping_scale =
+        getAdmittanceDampingScale(g_exp_params.admittance_damping_level);
+
+    Eigen::VectorXd ddq_adm = Eigen::VectorXd::Zero(model.nv);
+    Eigen::VectorXd tau_aan = Eigen::VectorXd::Zero(model.nv);
+
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      const double d0_i = ADMITTANCE_D_NOMINAL[i] * damping_scale;
+      const double k0_i = ADMITTANCE_K_NOMINAL[i];
+
+      // 左臂 IVDA 更新
+      const int lv = left_v_id[i];
+      const int lq = left_q_id[i];
+      const IvdaJointStepOutput ivda_l = computeIvdaAdaptiveTerms(
+          i, tau_ext(lv), bilateral_ivda_dq_adm(lv), d0_i, k0_i, dt,
+          bilateral_ivda_left_power_filt[i], bilateral_ivda_left_tau_abs_filt[i]);
+      const double ddq_l =
+          (ADMITTANCE_INPUT_GAIN_NOMINAL * tau_ext(lv) -
+           ivda_l.d_eff * bilateral_ivda_dq_adm(lv) -
+           ivda_l.k_eff * (bilateral_ivda_q_adm(lq) - q(lq))) /
+          ADMITTANCE_M_NOMINAL[i];
+      ddq_adm(lv) = clampAbs(ddq_l, ADMITTANCE_DDQ_LIMIT[i]);
+      tau_aan(lv) = ivda_l.tau_aan;
+
+      // 右臂 IVDA 更新
+      const int rv = right_v_id[i];
+      const int rq = right_q_id[i];
+      const IvdaJointStepOutput ivda_r = computeIvdaAdaptiveTerms(
+          i, tau_ext(rv), bilateral_ivda_dq_adm(rv), d0_i, k0_i, dt,
+          bilateral_ivda_right_power_filt[i], bilateral_ivda_right_tau_abs_filt[i]);
+      const double ddq_r =
+          (ADMITTANCE_INPUT_GAIN_NOMINAL * tau_ext(rv) -
+           ivda_r.d_eff * bilateral_ivda_dq_adm(rv) -
+           ivda_r.k_eff * (bilateral_ivda_q_adm(rq) - q(rq))) /
+          ADMITTANCE_M_NOMINAL[i];
+      ddq_adm(rv) = clampAbs(ddq_r, ADMITTANCE_DDQ_LIMIT[i]);
+      tau_aan(rv) = ivda_r.tau_aan;
+    }
+
+    bilateral_ivda_dq_adm = bilateral_ivda_dq_adm + ddq_adm * dt;
+    bilateral_ivda_q_adm = bilateral_ivda_q_adm + bilateral_ivda_dq_adm * dt;
+
+    if (!bilateral_ivda_q_adm.allFinite() || !bilateral_ivda_dq_adm.allFinite())
+    {
+      bilateral_ivda_fault_counter++;
+      reset_ivda_to_current(q);
+      output.valid = false;
+      return;
+    }
+
+    const std::array<double, 7> q_min = {
+        -30.0 * DEG2RAD, -30.0 * DEG2RAD, -30.0 * DEG2RAD,
+        -60.0 * DEG2RAD, -60.0 * DEG2RAD, -60.0 * DEG2RAD,
+        0.0 * DEG2RAD};
+    const std::array<double, 7> q_max = {
+        30.0 * DEG2RAD, 30.0 * DEG2RAD, 30.0 * DEG2RAD,
+        60.0 * DEG2RAD, 60.0 * DEG2RAD, 60.0 * DEG2RAD,
+        120.0 * DEG2RAD};
+
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      bilateral_ivda_q_adm(left_q_id[i]) =
+          clampBetween(bilateral_ivda_q_adm(left_q_id[i]), q_min[i], q_max[i]);
+      bilateral_ivda_q_adm(right_q_id[i]) =
+          clampBetween(bilateral_ivda_q_adm(right_q_id[i]), q_min[i], q_max[i]);
+      bilateral_ivda_dq_adm(left_v_id[i]) =
+          clampAbs(bilateral_ivda_dq_adm(left_v_id[i]), ADMITTANCE_DQ_LIMIT[i]);
+      bilateral_ivda_dq_adm(right_v_id[i]) =
+          clampAbs(bilateral_ivda_dq_adm(right_v_id[i]), ADMITTANCE_DQ_LIMIT[i]);
+    }
+
+    Eigen::VectorXd tau_grav = pinocchio::computeGeneralizedGravity(model, *data, q);
+    applyArmGravityCompensation(tau_grav, left_v_id, LEFT_ARM_GRAVITY_COMPENSATION);
+    applyArmGravityCompensation(tau_grav, right_v_id, RIGHT_ARM_GRAVITY_COMPENSATION);
+
+    Eigen::VectorXd tau_fric = Eigen::VectorXd::Zero(model.nv);
+    addArmFrictionCompensation(tau_fric, v, left_v_id, LEFT_ARM_FRICTION_COMPENSATION);
+    addArmFrictionCompensation(tau_fric, v, right_v_id, RIGHT_ARM_FRICTION_COMPENSATION);
+
+    Eigen::VectorXd Kp = Eigen::VectorXd::Zero(model.nv);
+    Eigen::VectorXd Kv = Eigen::VectorXd::Zero(model.nv);
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      Kp(left_v_id[i]) = ADMITTANCE_KP_NOMINAL[i];
+      Kv(left_v_id[i]) = ADMITTANCE_KV_NOMINAL[i];
+      Kp(right_v_id[i]) = ADMITTANCE_KP_NOMINAL[i];
+      Kv(right_v_id[i]) = ADMITTANCE_KV_NOMINAL[i];
+    }
+
+    Eigen::VectorXd tau_cmd =
+        tau_grav + tau_fric +
+        Kp.asDiagonal() * (bilateral_ivda_q_adm - q) +
+        Kv.asDiagonal() * (bilateral_ivda_dq_adm - v) +
+        tau_aan;
+
+    if (!tau_cmd.allFinite())
+    {
+      bilateral_ivda_fault_counter++;
+      reset_ivda_to_current(q);
+      output.valid = false;
+      return;
+    }
+
+    const std::array<double, 7> torque_limit = {
+        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+      double t_l = tau_cmd(left_v_id[i]);
+      const bool sat_l = clampAbsWithFlag(t_l, torque_limit[i]);
+      output.use_torque[left_ctrl_id[i]] = true;
+      output.target_torque[left_ctrl_id[i]] = t_l;
+
+      double t_r = -tau_cmd(right_v_id[i]);
+      const bool sat_r = clampAbsWithFlag(t_r, torque_limit[i]);
+      output.use_torque[right_ctrl_id[i]] = true;
+      output.target_torque[right_ctrl_id[i]] = t_r;
+
+      if (diag != nullptr)
+      {
+        diag->qd_deg[left_ctrl_id[i]] = bilateral_ivda_q_adm(left_q_id[i]) * RAD2DEG;
+        diag->qa_deg[left_ctrl_id[i]] = bilateral_ivda_q_adm(left_q_id[i]) * RAD2DEG;
+        diag->dqa_deg_s[left_ctrl_id[i]] = bilateral_ivda_dq_adm(left_v_id[i]) * RAD2DEG;
+        diag->ddqa_deg_s2[left_ctrl_id[i]] = ddq_adm(left_v_id[i]) * RAD2DEG;
+        diag->tau_int_nm[left_ctrl_id[i]] = tau_ext(left_v_id[i]);
+        diag->tau_grav_nm[left_ctrl_id[i]] = tau_grav(left_v_id[i]);
+        diag->tau_fric_nm[left_ctrl_id[i]] = tau_fric(left_v_id[i]);
+        diag->saturated[left_ctrl_id[i]] = sat_l;
+
+        diag->qd_deg[right_ctrl_id[i]] = bilateral_ivda_q_adm(right_q_id[i]) * RAD2DEG;
+        diag->qa_deg[right_ctrl_id[i]] = bilateral_ivda_q_adm(right_q_id[i]) * RAD2DEG;
+        diag->dqa_deg_s[right_ctrl_id[i]] = bilateral_ivda_dq_adm(right_v_id[i]) * RAD2DEG;
+        diag->ddqa_deg_s2[right_ctrl_id[i]] = ddq_adm(right_v_id[i]) * RAD2DEG;
+        diag->tau_int_nm[right_ctrl_id[i]] = tau_ext(right_v_id[i]);
+        diag->tau_grav_nm[right_ctrl_id[i]] = tau_grav(right_v_id[i]);
+        diag->tau_fric_nm[right_ctrl_id[i]] = tau_fric(right_v_id[i]);
+        diag->saturated[right_ctrl_id[i]] = sat_r;
+      }
+    }
+
+    if (diag != nullptr)
+    {
+      diag->proc_ft[SENSOR_LEFT_ARM] = left_arm;
+      diag->proc_ft[SENSOR_LEFT_HAND] = left_hand;
+      diag->proc_ft[SENSOR_RIGHT_ARM] = right_arm;
+      diag->proc_ft[SENSOR_RIGHT_HAND] = right_hand;
+      diag->ft_saturated = ft_sat;
+    }
+
+    if ((bilateral_ivda_debug_counter++ % 100) == 0)
+    {
+      std::cout << "[runBilateralAdaptiveActiveMode] damping_scale=" << damping_scale
+                << " dt=" << dt
+                << " fault=" << bilateral_ivda_fault_counter
                 << std::endl;
     }
 

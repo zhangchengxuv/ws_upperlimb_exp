@@ -430,6 +430,9 @@ private:
     case upperlimb_robot::MODE_ACTIVE:
     case upperlimb_robot::MODE_RIGHT_ACTIVE:
     case upperlimb_robot::MODE_BILATERAL_ACTIVE:
+    case upperlimb_robot::MODE_LEFT_ADAPTIVE_ACTIVE:
+    case upperlimb_robot::MODE_RIGHT_ADAPTIVE_ACTIVE:
+    case upperlimb_robot::MODE_BILATERAL_ADAPTIVE_ACTIVE:
       clearAllTorqueCommands();
       stopAllAxesMotionOnly();
       restoreAllAxesToPositionMode();
@@ -441,6 +444,7 @@ private:
     case upperlimb_robot::MODE_PASSIVE_SINE_PD_FF:
     case upperlimb_robot::MODE_LEFT_PRESET_POSITION:
     case upperlimb_robot::MODE_RIGHT_PRESET_POSITION:
+    case upperlimb_robot::MODE_BILATERAL_PRESET_POSITION:
       stopAllAxesMotionOnly();
       invalidateAllPositionCommandCache();
       break;
@@ -603,12 +607,68 @@ private:
       break;
     }
 
+    case upperlimb_robot::MODE_LEFT_ADAPTIVE_ACTIVE:
+    {
+      const bool ok = captureForceSensorBias();
+      upperlimb_robot::resetLeftAdaptiveActiveMode();
+      if (ok)
+      {
+        RCLCPP_INFO(this->get_logger(), "进入左臂创新自适应助力导纳(IVDA)模式，已记录六维力零偏并重置状态");
+      }
+      else
+      {
+        RCLCPP_WARN(this->get_logger(), "进入左臂 IVDA 模式失败：当前传感器数据无效，未记录零偏");
+      }
+      break;
+    }
+
+    case upperlimb_robot::MODE_RIGHT_ADAPTIVE_ACTIVE:
+    {
+      const bool ok = captureForceSensorBias();
+      upperlimb_robot::resetRightAdaptiveActiveMode();
+      if (ok)
+      {
+        RCLCPP_INFO(this->get_logger(), "进入右臂创新自适应助力导纳(IVDA)模式，已记录六维力零偏并重置状态");
+      }
+      else
+      {
+        RCLCPP_WARN(this->get_logger(), "进入右臂 IVDA 模式失败：当前传感器数据无效，未记录零偏");
+      }
+      break;
+    }
+
+    case upperlimb_robot::MODE_BILATERAL_ADAPTIVE_ACTIVE:
+    {
+      const bool bias_ok = captureForceSensorBias();
+      upperlimb_robot::resetBilateralAdaptiveActiveMode();
+
+      const bool torque_ok = enterDualArmTorqueModeOnce();
+
+      if (bias_ok && torque_ok)
+      {
+        RCLCPP_INFO(this->get_logger(), "进入双侧创新自适应助力导纳(IVDA)模式：已记录六维力零偏，14 个主动轴已切到扭矩模式");
+      }
+      else
+      {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "进入双侧 IVDA 模式：bias_ok=%d, torque_ok=%d，请检查传感器有效性和轴模式切换",
+            static_cast<int>(bias_ok),
+            static_cast<int>(torque_ok));
+      }
+      break;
+    }
+
     case upperlimb_robot::MODE_LEFT_PRESET_POSITION:
       RCLCPP_INFO(this->get_logger(), "进入左臂预设位置模式");
       break;
 
     case upperlimb_robot::MODE_RIGHT_PRESET_POSITION:
       RCLCPP_INFO(this->get_logger(), "进入右臂预设位置模式");
+      break;
+
+    case upperlimb_robot::MODE_BILATERAL_PRESET_POSITION:
+      RCLCPP_INFO(this->get_logger(), "进入双臂同步恢复初始位置模式");
       break;
 
     case upperlimb_robot::MODE_PASSIVE:
@@ -634,7 +694,8 @@ private:
   bool isDualArmTorqueMode(int mode) const
   {
     return mode == upperlimb_robot::MODE_BILATERAL_ZERO_FORCE ||
-           mode == upperlimb_robot::MODE_BILATERAL_ACTIVE;
+           mode == upperlimb_robot::MODE_BILATERAL_ACTIVE ||
+           mode == upperlimb_robot::MODE_BILATERAL_ADAPTIVE_ACTIVE;
   }
 
   std::array<std::size_t, 14> dualArmActiveTorqueIndices() const
@@ -1508,6 +1569,17 @@ private:
       }
       break;
 
+    case upperlimb_robot::MODE_BILATERAL_PRESET_POSITION:
+      upperlimb_robot::runBilateralPresetPosition(state, output);
+      for (std::size_t i = 0; i < upperlimb_robot::AXIS_NUM; ++i)
+      {
+        if (output.use_position[i])
+        {
+          diag.qd_deg[i] = output.target_position[i];
+        }
+      }
+      break;
+
     case upperlimb_robot::MODE_ZERO_FORCE:
       upperlimb_robot::runZeroForceMode(state, sensor_state, output, &diag);
       break;
@@ -1530,6 +1602,18 @@ private:
 
     case upperlimb_robot::MODE_BILATERAL_ACTIVE:
       upperlimb_robot::runBilateralActiveMode(state, sensor_state, actual_dt_s, output, &diag);
+      break;
+
+    case upperlimb_robot::MODE_LEFT_ADAPTIVE_ACTIVE:
+      upperlimb_robot::runLeftAdaptiveActiveMode(state, sensor_state, actual_dt_s, output, &diag);
+      break;
+
+    case upperlimb_robot::MODE_RIGHT_ADAPTIVE_ACTIVE:
+      upperlimb_robot::runRightAdaptiveActiveMode(state, sensor_state, actual_dt_s, output, &diag);
+      break;
+
+    case upperlimb_robot::MODE_BILATERAL_ADAPTIVE_ACTIVE:
+      upperlimb_robot::runBilateralAdaptiveActiveMode(state, sensor_state, actual_dt_s, output, &diag);
       break;
 
     case upperlimb_robot::MODE_PASSIVE:

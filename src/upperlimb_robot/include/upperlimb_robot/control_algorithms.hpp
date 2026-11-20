@@ -113,11 +113,23 @@ namespace upperlimb_robot
     // 双臂零力拖动模式
     MODE_BILATERAL_ZERO_FORCE = 9,
 
-    // 双侧主动导纳模式
+    // 双侧主动导纳模式（基线定参导纳）
     MODE_BILATERAL_ACTIVE = 13,
 
-    // 右臂主动导纳模式
+    // 右臂主动导纳模式（基线定参导纳）
     MODE_RIGHT_ACTIVE = 14,
+
+    // 双臂恢复初始位置模式（同时调用左右臂原预设位姿，原单臂逻辑不变）
+    MODE_BILATERAL_PRESET_POSITION = 20,
+
+    // 左臂创新主动模式：意图自适应变阻尼-按需助力导纳（IVDA）
+    MODE_LEFT_ADAPTIVE_ACTIVE = 21,
+
+    // 右臂创新主动模式：意图自适应变阻尼-按需助力导纳（IVDA）
+    MODE_RIGHT_ADAPTIVE_ACTIVE = 22,
+
+    // 双侧创新主动模式：双臂意图自适应变阻尼-按需助力导纳（IVDA）
+    MODE_BILATERAL_ADAPTIVE_ACTIVE = 23,
   };
 
   // ===================== 实验参数配置定义 =====================
@@ -282,6 +294,9 @@ namespace upperlimb_robot
   void resetActiveMode();
   void resetRightActiveMode();
   void resetBilateralActiveMode();
+  void resetLeftAdaptiveActiveMode();
+  void resetRightAdaptiveActiveMode();
+  void resetBilateralAdaptiveActiveMode();
   void resetPassiveMode();
   void resetPassivePDFFMode();
 
@@ -290,9 +305,10 @@ namespace upperlimb_robot
   // 空闲模式
   void runIdle(const MotorStateCache &state, ControlOutputCache &output);
 
-  // 预设位姿模式（严格原样保留）
+  // 预设位姿模式（单臂严格原样保留；双臂同步复用左右臂原预设参数）
   void runLeftPresetPosition(const MotorStateCache &state, ControlOutputCache &output);
   void runRightPresetPosition(const MotorStateCache &state, ControlOutputCache &output);
+  void runBilateralPresetPosition(const MotorStateCache &state, ControlOutputCache &output);
 
   // 零力拖动模式
   void runZeroForceMode(
@@ -329,6 +345,28 @@ namespace upperlimb_robot
       AlgorithmDiagData *diag = nullptr);
 
   void runBilateralActiveMode(
+      const MotorStateCache &state,
+      const SensorStateCache &sensor_state,
+      double dt_s,
+      ControlOutputCache &output,
+      AlgorithmDiagData *diag = nullptr);
+
+  // 创新对照：意图自适应变阻尼-按需助力导纳（IVDA，使用实际控制周期 dt_s）
+  void runLeftAdaptiveActiveMode(
+      const MotorStateCache &state,
+      const SensorStateCache &sensor_state,
+      double dt_s,
+      ControlOutputCache &output,
+      AlgorithmDiagData *diag = nullptr);
+
+  void runRightAdaptiveActiveMode(
+      const MotorStateCache &state,
+      const SensorStateCache &sensor_state,
+      double dt_s,
+      ControlOutputCache &output,
+      AlgorithmDiagData *diag = nullptr);
+
+  void runBilateralAdaptiveActiveMode(
       const MotorStateCache &state,
       const SensorStateCache &sensor_state,
       double dt_s,

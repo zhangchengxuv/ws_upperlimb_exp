@@ -76,6 +76,15 @@ int main(int argc, char **argv)
       std::cerr << "[FAIL] runRightPresetPosition 核查失败\n";
       return 1;
     }
+    runBilateralPresetPosition(st, out);
+    if (!out.valid ||
+        !out.use_position[0] || !out.use_position[10] ||
+        std::abs(out.target_position[6] - 45.0) > 1e-6 ||
+        std::abs(out.target_position[16] - 45.0) > 1e-6)
+    {
+      std::cerr << "[FAIL] runBilateralPresetPosition(MODE=20) 核查失败\n";
+      return 1;
+    }
 
     st.position[13] = 5.0;  // L_GH1
     st.position[14] = -8.0; // L_GH2
@@ -291,6 +300,81 @@ int main(int argc, char **argv)
         return 1;
       }
       std::cout << "[PASS] MODE_BILATERAL_ACTIVE(13) 真实 Pinocchio + 双侧 qa/dqa/ddqa 字段校验通过\n";
+    }
+
+    // 2g. MODE_LEFT_ADAPTIVE_ACTIVE(21) - 创新 IVDA 左臂
+    {
+      ControlOutputCache out{};
+      AlgorithmDiagData diag{};
+      resetLeftAdaptiveActiveMode();
+      for (int k = 0; k < 20; ++k)
+      {
+        runLeftAdaptiveActiveMode(st, sens, 0.01, out, &diag);
+      }
+      if (!out.valid ||
+          maxAbsRange(diag.qa_deg, 10, 16) < 1e-4 ||
+          maxAbsRange(diag.dqa_deg_s, 10, 16) < 1e-4 ||
+          maxAbsRange(diag.ddqa_deg_s2, 10, 16) < 1e-4 ||
+          maxAbsRange(diag.tau_int_nm, 10, 16) < 1e-4 ||
+          maxAbsRange(diag.tau_grav_nm, 10, 16) < 1e-4 ||
+          maxAbsRange(diag.tau_fric_nm, 10, 16) < 1e-4 ||
+          maxAbsRange(out.target_torque, 10, 16) < 1e-4)
+      {
+        std::cerr << "[FAIL] MODE_LEFT_ADAPTIVE_ACTIVE(21) 字段校验失败\n";
+        return 1;
+      }
+      std::cout << "[PASS] MODE_LEFT_ADAPTIVE_ACTIVE(21) IVDA 创新模型 + qa/dqa/ddqa 校验通过\n";
+    }
+
+    // 2h. MODE_RIGHT_ADAPTIVE_ACTIVE(22) - 创新 IVDA 右臂
+    {
+      ControlOutputCache out{};
+      AlgorithmDiagData diag{};
+      resetRightAdaptiveActiveMode();
+      for (int k = 0; k < 20; ++k)
+      {
+        runRightAdaptiveActiveMode(st, sens, 0.01, out, &diag);
+      }
+      if (!out.valid ||
+          maxAbsRange(diag.qa_deg, 0, 6) < 1e-4 ||
+          maxAbsRange(diag.dqa_deg_s, 0, 6) < 1e-4 ||
+          maxAbsRange(diag.ddqa_deg_s2, 0, 6) < 1e-4 ||
+          maxAbsRange(diag.tau_int_nm, 0, 6) < 1e-4 ||
+          maxAbsRange(diag.tau_grav_nm, 0, 6) < 1e-4 ||
+          maxAbsRange(diag.tau_fric_nm, 0, 6) < 1e-4 ||
+          maxAbsRange(out.target_torque, 0, 6) < 1e-4)
+      {
+        std::cerr << "[FAIL] MODE_RIGHT_ADAPTIVE_ACTIVE(22) 字段校验失败\n";
+        return 1;
+      }
+      std::cout << "[PASS] MODE_RIGHT_ADAPTIVE_ACTIVE(22) IVDA 创新模型 + qa/dqa/ddqa 校验通过\n";
+    }
+
+    // 2i. MODE_BILATERAL_ADAPTIVE_ACTIVE(23) - 创新 IVDA 双侧
+    {
+      ControlOutputCache out{};
+      AlgorithmDiagData diag{};
+      resetBilateralAdaptiveActiveMode();
+      for (int k = 0; k < 20; ++k)
+      {
+        runBilateralAdaptiveActiveMode(st, sens, 0.01, out, &diag);
+      }
+      if (!out.valid ||
+          maxAbsRange(diag.qa_deg, 0, 6) < 1e-4 ||
+          maxAbsRange(diag.qa_deg, 10, 16) < 1e-4 ||
+          maxAbsRange(diag.dqa_deg_s, 0, 6) < 1e-4 ||
+          maxAbsRange(diag.dqa_deg_s, 10, 16) < 1e-4 ||
+          maxAbsRange(diag.ddqa_deg_s2, 0, 6) < 1e-4 ||
+          maxAbsRange(diag.ddqa_deg_s2, 10, 16) < 1e-4 ||
+          maxAbsRange(diag.tau_int_nm, 0, 6) < 1e-4 ||
+          maxAbsRange(diag.tau_int_nm, 10, 16) < 1e-4 ||
+          maxAbsRange(out.target_torque, 0, 6) < 1e-4 ||
+          maxAbsRange(out.target_torque, 10, 16) < 1e-4)
+      {
+        std::cerr << "[FAIL] MODE_BILATERAL_ADAPTIVE_ACTIVE(23) 字段校验失败\n";
+        return 1;
+      }
+      std::cout << "[PASS] MODE_BILATERAL_ADAPTIVE_ACTIVE(23) IVDA 创新模型 + 双侧 qa/dqa/ddqa 校验通过\n";
     }
   }
 
