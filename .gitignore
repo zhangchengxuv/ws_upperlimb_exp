@@ -4,9 +4,9 @@ install/
 log/
 
 # 实验数据与日志文件
-data/
+# data/
 # *.csv
-*.log
+# *.log
 
 # Python / IDE 临时文件
 __pycache__/
