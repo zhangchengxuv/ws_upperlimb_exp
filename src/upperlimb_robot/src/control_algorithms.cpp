@@ -24,12 +24,12 @@ namespace upperlimb_robot
   // ===================== 全局统一重力补偿参数 =====================
   //
   // 所有控制模式共用这两套参数。
-  // 左臂顺序：joint1~joint7
+  // 左臂顺序：joint1~joint7（基于 2026-11-20 MODE_ZERO_FORCE 实机双向中位数精标 GH1~GH3 欠补）
   const GravityCompensationParameters LEFT_ARM_GRAVITY_COMPENSATION{
-      {1.25, 1.05, 1.00, 1.00, 1.00, 1.00, 1.00},
+      {1.25, 1.05, 1.00, 1.15, 1.10, 1.10, 1.00},
       {0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00}};
 
-  // 右臂顺序：joint11~joint17
+  // 右臂顺序：joint11~joint17（待右臂零力实测后再针对性精标）
   const GravityCompensationParameters RIGHT_ARM_GRAVITY_COMPENSATION{
       {1.25, 1.05, 1.00, 1.00, 1.00, 1.00, 1.00},
       {0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00}};
@@ -37,10 +37,12 @@ namespace upperlimb_robot
   // ===================== 全局统一关节摩擦补偿参数 =====================
   //
   // 左臂顺序：joint1~joint7
+  // 2026-11-20 实测残余库仑摩擦 SG3/GH1/GH2/GH3 约 1.86~3.21 Nm；
+  // 现保守补偿至约 30%（远低于自激阈值）并将零速平滑区加宽至 0.08 rad/s，减轻拖动阻滞且静止零嗡鸣。
   const FrictionCompensationParameters LEFT_ARM_FRICTION_COMPENSATION{
-      {0.22, 0.20, 0.15, 0.15, 0.10, 0.10, 0.08},
+      {0.55, 0.25, 0.90, 1.00, 0.65, 0.55, 0.20},
       {0.40, 0.40, 0.40, 0.40, 0.40, 0.40, 0.40},
-      {0.06, 0.06, 0.03, 0.03, 0.03, 0.03, 0.03}};
+      {0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.06}};
 
   // 右臂顺序：joint11~joint17
   const FrictionCompensationParameters RIGHT_ARM_FRICTION_COMPENSATION{
@@ -184,9 +186,18 @@ namespace upperlimb_robot
       return x;
     }
 
+    // 连续软死区（shrinkage）：避免跨越 deadzone 阈值时的力矩阶跃冲击
     inline double applyDeadzone(double x, double dz)
     {
-      return (std::abs(x) < dz) ? 0.0 : x;
+      if (x > dz)
+      {
+        return x - dz;
+      }
+      if (x < -dz)
+      {
+        return x + dz;
+      }
+      return 0.0;
     }
 
     inline bool clampWrenchWithFlag(ForceSensorData &w, double force_limit, double moment_limit)
@@ -962,9 +973,9 @@ namespace upperlimb_robot
         g + Kp.asDiagonal() * (left_active_q_adm - q) +
         Kv.asDiagonal() * (left_active_dq_adm - v);
 
-    // 最终扭矩限幅
+    // 最终扭矩限幅（单轴额定扭矩 61/61/43.7/49/43.7/36.4/18 Nm，留足 SG1/GH1 重力+交互裕度）
     const std::array<double, 7> torque_limit = {
-        24.0, 24.0, 18.0, 12.0, 12.0, 12.0, 8.0};
+        42.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -1321,9 +1332,9 @@ namespace upperlimb_robot
       return;
     }
 
-    // 最终扭矩限幅与右臂输出方向修正（-1.0）
+    // 最终扭矩限幅与右臂输出方向修正（-1.0）（单轴额定扭矩 61/61/43.7/49/43.7/36.4/18 Nm）
     const std::array<double, 7> torque_limit = {
-        24.0, 24.0, 18.0, 12.0, 12.0, 12.0, 8.0};
+        42.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -1549,8 +1560,9 @@ namespace upperlimb_robot
     Eigen::VectorXd tau_damping = -(damping.asDiagonal() * v);
     Eigen::VectorXd tau = g + tau_ext + tau_damping;
 
+    // 扭矩限幅（单轴额定扭矩 61/61/43.7/49/43.7/36.4/18 Nm，避免 SG1 重力>30Nm 与 GH1 拖动饱和）
     const std::array<double, 7> torque_limit = {
-        30.0, 20.0, 16.0, 12.0, 12.0, 12.0, 8.0};
+        42.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -1794,8 +1806,9 @@ namespace upperlimb_robot
     Eigen::VectorXd tau_damping = -(damping.asDiagonal() * v);
     Eigen::VectorXd tau = g + tau_ext + tau_damping;
 
+    // 扭矩限幅（单轴额定扭矩 61/61/43.7/49/43.7/36.4/18 Nm，避免 SG1 重力>30Nm 与 GH1 拖动饱和）
     const std::array<double, 7> torque_limit = {
-        30.0, 20.0, 16.0, 12.0, 12.0, 12.0, 8.0};
+        42.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
 
     // 右臂输出保留原 -1.0 方向修正
     for (std::size_t i = 0; i < 7; ++i)
@@ -2087,7 +2100,7 @@ namespace upperlimb_robot
     Eigen::VectorXd tau = g + tau_ext + tau_stabilizing_damping;
 
     const std::array<double, 7> torque_limit = {
-        30.0, 30.0, 30.0, 30.0, 18.0, 18.0, 18.0};
+        42.0, 30.0, 30.0, 30.0, 18.0, 18.0, 18.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -2585,13 +2598,17 @@ namespace upperlimb_robot
 
     const double t = passive_pdff_elapsed_t;
 
-    // 2.0 s 余弦渐入包络及其解析导数
+    // 2.0 s 余弦渐入包络及其一阶、二阶解析导数
     constexpr double RAMP_DURATION_S = 2.0;
     const double u = clampBetween(t / RAMP_DURATION_S, 0.0, 1.0);
     const double ramp = 0.5 * (1.0 - std::cos(M_PI * u));
     const double dramp_dt =
         (t < RAMP_DURATION_S)
             ? (0.5 * (M_PI / RAMP_DURATION_S) * std::sin(M_PI * u))
+            : 0.0;
+    const double ddramp_dt2 =
+        (t < RAMP_DURATION_S)
+            ? (0.5 * (M_PI / RAMP_DURATION_S) * (M_PI / RAMP_DURATION_S) * std::cos(M_PI * u))
             : 0.0;
 
     const int joint_profile = g_exp_params.passive_joint_profile;
@@ -2612,13 +2629,14 @@ namespace upperlimb_robot
     else if (joint_profile == PASSIVE_JOINT_J7_ONLY)
       amp = {0.0, 0.0, 0.0, base_amp[3]};
 
-    // PD + 速度前馈参数（基于 2026-11-20 实机滞后与稳定性分析整定）：
-    // 1. 反馈增益 Kp=0.25 远小于延迟稳定边界 1.0，Kd=0.0 不引入测速噪声，彻底消除 5~8 Hz 抖动；
-    // 2. 用解析无噪速度前馈 Kff * dq_ref（开环提前量，不影响闭环稳定性）抵消 60~95 ms 内环滞后；
-    // 3. 恢复 smooth_time=25、acc/dec=3.0 保证柔顺平稳，且起步 t=0 时 dq_ref=0 零跳变。
+    // PD + 二阶解析前馈参数（基于 2026-11-20 smooth_time=25 开环对象延迟辨识 qc->q 整定）：
+    // 1. 反馈增益 Kp=0.25 远小于纯延迟稳定边界 1.0，Kd=0.0 不引入测速噪声，彻底消除 5~8 Hz 抖动；
+    // 2. 用实测 smooth_time=25 开环延迟 Kff_s = {58, 77, 98, 92} ms 做一阶速度 + 二阶加速度解析前馈
+    //    q_ref + Kff*dq_ref + 0.5*Kff^2*ddq_ref*ramp（完全开环无噪，不影响闭环稳定性，且 t=0 精确零跳变）；
+    // 3. 保持 smooth_time=25、acc/dec=3.0 保证轨迹柔顺平稳。
     constexpr double Kp = 0.25;
     constexpr double Kd = 0.00;
-    const std::array<double, 4> Kff_s = {0.060, 0.080, 0.095, 0.085}; // J4(GH1), J5(GH2), J6(GH3), J7(EB1)
+    const std::array<double, 4> Kff_s = {0.058, 0.077, 0.098, 0.092}; // J4(GH1), J5(GH2), J6(GH3), J7(EB1)
 
     // 背部 joint1~3 固定在进入模式时的初始角
     for (std::size_t i = 0; i < 3; ++i)
@@ -2646,11 +2664,17 @@ namespace upperlimb_robot
 
       const double q_ref = q0 + ramp * amp[k] * s_val;
       const double dq_ref = dramp_dt * amp[k] * s_val + ramp * amp[k] * w * c_val;
+      const double ddq_ref =
+          ddramp_dt2 * amp[k] * s_val +
+          2.0 * dramp_dt * amp[k] * w * c_val -
+          ramp * amp[k] * w * w * s_val;
 
       const double e = q_ref - q_meas;
       const double ev = dq_ref - dq_meas;
 
-      double q_cmd = q_ref + Kff_s[k] * dq_ref + Kp * e + Kd * ev;
+      const double ff_lead =
+          Kff_s[k] * dq_ref + (0.5 * Kff_s[k] * Kff_s[k] * ddq_ref * ramp);
+      double q_cmd = q_ref + ff_lead + Kp * e + Kd * ev;
       const bool sat = clampBetweenWithFlag(q_cmd, q0 - rel_limit[k], q0 + rel_limit[k]);
 
       output.use_position[idx] = true;
@@ -3127,7 +3151,7 @@ namespace upperlimb_robot
     }
 
     const std::array<double, 7> torque_limit = {
-        30.0, 30.0, 20.0, 16.0, 16.0, 16.0, 10.0};
+        42.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {

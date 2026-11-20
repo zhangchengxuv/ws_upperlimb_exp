@@ -178,7 +178,7 @@ int main(int argc, char **argv)
           maxAbsRange(diag.tau_grav_nm, 10, 16) < 1e-4 ||
           maxAbsRange(diag.tau_fric_nm, 10, 16) < 1e-4 ||
           maxAbsRange(out.target_torque, 10, 16) < 1e-4 ||
-          std::abs(diag.proc_ft[SENSOR_LEFT_ARM].fz - 9.6) > 1e-4)
+          std::abs(diag.proc_ft[SENSOR_LEFT_ARM].fz - 8.4) > 1e-4)
       {
         std::cerr << "[FAIL] MODE_ZERO_FORCE(4) 字段校验失败\n";
         return 1;
@@ -196,7 +196,7 @@ int main(int argc, char **argv)
           maxAbsRange(diag.tau_grav_nm, 0, 6) < 1e-4 ||
           maxAbsRange(diag.tau_fric_nm, 0, 6) < 1e-4 ||
           maxAbsRange(out.target_torque, 0, 6) < 1e-4 ||
-          std::abs(diag.proc_ft[SENSOR_RIGHT_ARM].fz - 9.6) > 1e-4)
+          std::abs(diag.proc_ft[SENSOR_RIGHT_ARM].fz - 8.4) > 1e-4)
       {
         std::cerr << "[FAIL] MODE_RIGHT_ZERO_FORCE(8) 字段校验失败\n";
         return 1;
@@ -516,13 +516,13 @@ int main(int argc, char **argv)
     if (vals[idx_event] == "END")
       seen_end = true;
 
-    // 验证 raw_ft_la_fz_N=8.8, ft_bias_la_fz_N=0.8, proc_ft_la_fz_N=(8.8-0.8)*1.20=9.6
+    // 验证 raw_ft_la_fz_N=8.8, ft_bias_la_fz_N=0.8, 连续软死区 dz=1.0 后 proc_ft_la_fz_N=(8.8-0.8-1.0)*1.20=8.4
     const double raw_v = std::stod(vals[idx_raw_fz]);
     const double bias_v = std::stod(vals[idx_bias_fz]);
     const double proc_v = std::stod(vals[idx_proc_fz]);
     if (std::abs(raw_v - 8.8) > 1e-4 ||
         std::abs(bias_v - 0.8) > 1e-4 ||
-        std::abs(proc_v - 9.6) > 1e-4)
+        std::abs(proc_v - 8.4) > 1e-4)
     {
       ft_separated_ok = false;
     }

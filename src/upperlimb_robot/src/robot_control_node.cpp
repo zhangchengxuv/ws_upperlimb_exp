@@ -1822,15 +1822,6 @@ private:
         continue;
       }
 
-      const int axis = axis_ids_[i];
-
-      unsigned short actual_mode = static_cast<unsigned short>(-1);
-      const short rtn_get_mode = GTN_GetEcatAxisMode(core_id_, axis, &actual_mode);
-      if (rtn_get_mode == 0)
-      {
-        axis_in_torque_mode_[i] = (actual_mode == 10);
-      }
-
       if (output.use_torque[i])
       {
         command_sent_[i] = false;
@@ -1847,6 +1838,19 @@ private:
           (void)ensureAxisInPositionMode(i);
         }
         continue;
+      }
+
+      const int axis = axis_ids_[i];
+
+      // 仅在模式未确认（扭矩态或首次配置位置规划）时查询 EtherCAT 轴模式，避免每周期 14 次总线冗余查询
+      if (axis_in_torque_mode_[i] || !position_profile_configured_[i])
+      {
+        unsigned short actual_mode = static_cast<unsigned short>(-1);
+        const short rtn_get_mode = GTN_GetEcatAxisMode(core_id_, axis, &actual_mode);
+        if (rtn_get_mode == 0)
+        {
+          axis_in_torque_mode_[i] = (actual_mode == 10);
+        }
       }
 
       if (axis_in_torque_mode_[i])
@@ -1975,6 +1979,7 @@ private:
   void applyTorqueOutput(const upperlimb_robot::ControlOutputCache &output)
   {
     const bool dual_arm_torque_mode = isDualArmTorqueMode(applied_mode_);
+    const bool periodic_mode_audit = ((torque_mode_audit_tick_++ % 50U) == 0U);
 
     for (std::size_t i = 0; i < upperlimb_robot::AXIS_NUM; ++i)
     {
@@ -1991,19 +1996,11 @@ private:
         continue;
       }
 
-      const int axis = axis_ids_[i];
-
-      unsigned short actual_mode = static_cast<unsigned short>(-1);
-      const short rtn_get_mode = GTN_GetEcatAxisMode(core_id_, axis, &actual_mode);
-      if (rtn_get_mode == 0)
-      {
-        axis_in_torque_mode_[i] = (actual_mode == 10);
-      }
-
       if (!output.use_torque[i])
       {
         if (axis_in_torque_mode_[i])
         {
+          const int axis = axis_ids_[i];
           (void)GTN_SetEcatAxisPT(core_id_, axis, 0);
           if (!dual_arm_torque_mode)
           {
@@ -2012,6 +2009,19 @@ private:
         }
         last_target_torque_[i] = 0.0;
         continue;
+      }
+
+      const int axis = axis_ids_[i];
+
+      // 稳态扭矩模式下避免每周期 14 次总线模式轮询；仅在未确认扭矩态或每 50 周期(~2 Hz)做一次硬件巡检
+      if (!axis_in_torque_mode_[i] || periodic_mode_audit)
+      {
+        unsigned short actual_mode = static_cast<unsigned short>(-1);
+        const short rtn_get_mode = GTN_GetEcatAxisMode(core_id_, axis, &actual_mode);
+        if (rtn_get_mode == 0)
+        {
+          axis_in_torque_mode_[i] = (actual_mode == 10);
+        }
       }
 
       const double test_raw = upperlimb_robot::torqueNmToRaw(axis, 1.0);
@@ -2289,6 +2299,7 @@ private:
   // 100 Hz 连续位置轨迹每步增量约 0.01~0.10 deg；0.01 deg 兼顾顺滑流式更新与抑制微噪触发。
   double position_epsilon_ = 0.01;
   double torque_epsilon_ = 0.01;
+  std::uint64_t torque_mode_audit_tick_{0};
 };
 
 static std::shared_ptr<RobotControlNode> g_node = nullptr;
