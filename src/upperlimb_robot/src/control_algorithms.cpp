@@ -436,22 +436,29 @@ namespace upperlimb_robot
     std::array<double, 7> bilateral_ivda_right_tau_abs_filt{};
 
     // ===================== 统一标称主动导纳参数（基线定参导纳与创新 IVDA 共用同一标称基准，保证严格消融对照） =====================
-    // 基于 2026-11-20 DAONA_145120 实机分析：原 D_a=45/20/12 导致 56%~75% 反向制动，现降阻提效至正向助力区
+    // 基于 2026-11-20 mode3_155301 & mode21_155418 实机对照数据二轮精标：
+    // 1. 轻量化 M_a 并微调 D_a0(GH3 5.5->4.8 消换向制动, EB1 3.5->2.8 增助力感)；
+    // 2. 适度提高 K_a0 并新增相对超前限幅 ADMITTANCE_DELTA_Q_MAX，防止 qa 跑飞 30° 引发 SG1/GH1 饱和与换向甩尾。
     constexpr double ADMITTANCE_INPUT_GAIN_NOMINAL = 1.50;
     constexpr std::array<double, 7> ADMITTANCE_M_NOMINAL = {
-        1.20, 1.20, 0.90, 0.55, 0.55, 0.45, 0.30};
+        1.00, 1.00, 0.80, 0.50, 0.50, 0.40, 0.25};
     constexpr std::array<double, 7> ADMITTANCE_D_NOMINAL = {
-        12.0, 12.0, 9.5, 6.5, 6.0, 5.5, 3.5};
+        11.0, 11.5, 9.0, 6.5, 5.8, 4.8, 2.8};
     constexpr std::array<double, 7> ADMITTANCE_K_NOMINAL = {
-        4.0, 4.0, 3.2, 2.2, 2.0, 1.8, 1.2};
+        5.5, 5.5, 4.2, 3.0, 2.8, 2.6, 1.5};
     constexpr std::array<double, 7> ADMITTANCE_KP_NOMINAL = {
-        22.0, 22.0, 18.0, 16.0, 16.0, 14.0, 10.0};
+        22.0, 22.0, 18.0, 16.0, 16.0, 14.0, 12.0};
     constexpr std::array<double, 7> ADMITTANCE_KV_NOMINAL = {
         4.0, 4.0, 3.0, 2.5, 2.5, 2.0, 1.5};
     constexpr std::array<double, 7> ADMITTANCE_DDQ_LIMIT = {
         6.0, 6.0, 6.0, 8.0, 8.0, 8.0, 10.0};
     constexpr std::array<double, 7> ADMITTANCE_DQ_LIMIT = {
         1.2, 1.2, 1.2, 1.8, 1.8, 1.8, 2.0};
+    // 导纳参考相对当前关节角的安全最大超前量（rad）：15/12/15/16/16/15/14 deg
+    constexpr std::array<double, 7> ADMITTANCE_DELTA_Q_MAX_RAD = {
+        15.0 * M_PI / 180.0, 12.0 * M_PI / 180.0, 15.0 * M_PI / 180.0,
+        16.0 * M_PI / 180.0, 16.0 * M_PI / 180.0, 15.0 * M_PI / 180.0,
+        14.0 * M_PI / 180.0};
 
     // 创新 IVDA 变阻尼-按需助力（Intent-Adaptive Variable-Damping & AAN）单关节更新器
     // 严格保证 D_eff > 0、K_eff > 0、tau_aan 有界且在松手/减速时自动归零，确保无源稳定
@@ -474,11 +481,11 @@ namespace upperlimb_robot
     {
       constexpr std::array<double, 7> P_REF = {1.50, 1.50, 1.00, 0.70, 0.70, 0.60, 0.35};
       constexpr std::array<double, 7> TAU_REL = {0.90, 0.90, 0.70, 0.45, 0.45, 0.40, 0.25};
-      constexpr std::array<double, 7> AAN_GAIN = {0.40, 0.35, 0.40, 0.40, 0.35, 0.35, 0.35};
-      constexpr std::array<double, 7> AAN_LIMIT = {6.0, 4.0, 4.0, 3.5, 3.0, 3.0, 2.0};
+      constexpr std::array<double, 7> AAN_GAIN = {0.42, 0.35, 0.40, 0.40, 0.38, 0.38, 0.38};
+      constexpr std::array<double, 7> AAN_LIMIT = {5.5, 4.0, 4.0, 3.5, 3.0, 3.0, 2.0};
 
-      // 一阶低通滤波（时间常数 60 ms，dt 自适应，50 Hz / 100 Hz 等效）
-      const double lp_alpha = clampBetween(dt / (0.06 + dt), 0.02, 0.50);
+      // 一阶低通滤波（时间常数 55 ms，dt 自适应，50 Hz / 100 Hz 等效）
+      const double lp_alpha = clampBetween(dt / (0.055 + dt), 0.02, 0.50);
       const double p_raw = tau_ext_i * dq_adm_i;
       power_filt += lp_alpha * (p_raw - power_filt);
       tau_abs_filt += lp_alpha * (std::abs(tau_ext_i) - tau_abs_filt);
@@ -495,20 +502,20 @@ namespace upperlimb_robot
       double k_intent = k0_i;
       if (sigma >= 0.0)
       {
-        // 主动发力相：平滑降阻尼至最低 0.45*D0、松弛虚拟锚定至 0.55*K0，顺水推舟
+        // 主动发力相：平滑降阻尼至最低 0.45*D0、适度松弛锚定至 0.70*K0（兼顾轻快助力与不甩尾）
         d_intent = d0_i * (1.0 - 0.55 * sigma);
-        k_intent = k0_i * (1.0 - 0.45 * sigma);
+        k_intent = k0_i * (1.0 - 0.30 * sigma);
       }
       else
       {
-        // 减速/反向制动相：平滑增阻尼至最高 1.65*D0、收紧锚定至 1.30*K0，抑制过冲
-        d_intent = d0_i * (1.0 - 0.65 * sigma);
-        k_intent = k0_i * (1.0 - 0.30 * sigma);
+        // 减速/换向制动相：平滑增阻尼至最高 1.80*D0、收紧锚定至 1.35*K0，换向更利落
+        d_intent = d0_i * (1.0 - 0.80 * sigma);
+        k_intent = k0_i * (1.0 - 0.35 * sigma);
       }
 
       IvdaJointStepOutput res{};
-      res.d_eff = (1.0 - release_w) * d_intent + release_w * (1.50 * d0_i);
-      res.k_eff = (1.0 - release_w) * k_intent + release_w * (1.30 * k0_i);
+      res.d_eff = (1.0 - release_w) * d_intent + release_w * (1.55 * d0_i);
+      res.k_eff = (1.0 - release_w) * k_intent + release_w * (1.35 * k0_i);
 
       // 3. 功率门控同向按需助力前馈（仅主动同向运动时平滑开启，松手或减速立即归零）
       const double gate_power =
@@ -1076,10 +1083,11 @@ namespace upperlimb_robot
 
     for (std::size_t i = 0; i < 7; ++i)
     {
-      left_active_q_adm(static_cast<Eigen::Index>(i)) =
-          clampBetween(left_active_q_adm(static_cast<Eigen::Index>(i)), q_min[i], q_max[i]);
-      left_active_dq_adm(static_cast<Eigen::Index>(i)) =
-          clampAbs(left_active_dq_adm(static_cast<Eigen::Index>(i)), ADMITTANCE_DQ_LIMIT[i]);
+      const Eigen::Index ei = static_cast<Eigen::Index>(i);
+      const double q_lo = std::max(q_min[i], q(ei) - ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      const double q_hi = std::min(q_max[i], q(ei) + ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      left_active_q_adm(ei) = clampBetween(left_active_q_adm(ei), q_lo, q_hi);
+      left_active_dq_adm(ei) = clampAbs(left_active_dq_adm(ei), ADMITTANCE_DQ_LIMIT[i]);
     }
 
     // 重力补偿与摩擦补偿（分开记录，求和与原公式完全等价）
@@ -1109,7 +1117,7 @@ namespace upperlimb_robot
 
     // 最终扭矩限幅（单轴额定扭矩 61/61/43.7/49/43.7/36.4/18 Nm，留足 SG1/GH1 重力+交互裕度）
     const std::array<double, 7> torque_limit = {
-        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+        50.0, 30.0, 22.0, 24.0, 16.0, 16.0, 10.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -1414,10 +1422,11 @@ namespace upperlimb_robot
 
     for (std::size_t i = 0; i < 7; ++i)
     {
-      right_active_q_adm(static_cast<Eigen::Index>(i)) =
-          clampBetween(right_active_q_adm(static_cast<Eigen::Index>(i)), q_min[i], q_max[i]);
-      right_active_dq_adm(static_cast<Eigen::Index>(i)) =
-          clampAbs(right_active_dq_adm(static_cast<Eigen::Index>(i)), ADMITTANCE_DQ_LIMIT[i]);
+      const Eigen::Index ei = static_cast<Eigen::Index>(i);
+      const double q_lo = std::max(q_min[i], q(ei) - ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      const double q_hi = std::min(q_max[i], q(ei) + ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      right_active_q_adm(ei) = clampBetween(right_active_q_adm(ei), q_lo, q_hi);
+      right_active_dq_adm(ei) = clampAbs(right_active_dq_adm(ei), ADMITTANCE_DQ_LIMIT[i]);
     }
 
     // 统一重力补偿与摩擦补偿
@@ -1462,7 +1471,7 @@ namespace upperlimb_robot
 
     // 最终扭矩限幅与右臂输出方向修正（-1.0）（单轴额定扭矩 61/61/43.7/49/43.7/36.4/18 Nm）
     const std::array<double, 7> torque_limit = {
-        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+        50.0, 30.0, 22.0, 24.0, 16.0, 16.0, 10.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -1690,7 +1699,7 @@ namespace upperlimb_robot
 
     // 扭矩限幅（单轴额定扭矩 61/61/43.7/49/43.7/36.4/18 Nm，避免 SG1 重力>30Nm 与 GH1 拖动饱和）
     const std::array<double, 7> torque_limit = {
-        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+        50.0, 30.0, 22.0, 24.0, 16.0, 16.0, 10.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -1936,7 +1945,7 @@ namespace upperlimb_robot
 
     // 扭矩限幅（单轴额定扭矩 61/61/43.7/49/43.7/36.4/18 Nm，避免 SG1 重力>30Nm 与 GH1 拖动饱和）
     const std::array<double, 7> torque_limit = {
-        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+        50.0, 30.0, 22.0, 24.0, 16.0, 16.0, 10.0};
 
     // 右臂输出保留原 -1.0 方向修正
     for (std::size_t i = 0; i < 7; ++i)
@@ -3251,10 +3260,14 @@ namespace upperlimb_robot
 
     for (std::size_t i = 0; i < 7; ++i)
     {
+      const double l_lo = std::max(q_min_value[i], q(left_q_id[i]) - ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      const double l_hi = std::min(q_max_value[i], q(left_q_id[i]) + ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      const double r_lo = std::max(q_min_value[i], q(right_q_id[i]) - ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      const double r_hi = std::min(q_max_value[i], q(right_q_id[i]) + ADMITTANCE_DELTA_Q_MAX_RAD[i]);
       bilateral_active_q_adm(left_q_id[i]) =
-          clampBetween(bilateral_active_q_adm(left_q_id[i]), q_min_value[i], q_max_value[i]);
+          clampBetween(bilateral_active_q_adm(left_q_id[i]), l_lo, l_hi);
       bilateral_active_q_adm(right_q_id[i]) =
-          clampBetween(bilateral_active_q_adm(right_q_id[i]), q_min_value[i], q_max_value[i]);
+          clampBetween(bilateral_active_q_adm(right_q_id[i]), r_lo, r_hi);
       bilateral_active_dq_adm(left_v_id[i]) =
           clampAbs(bilateral_active_dq_adm(left_v_id[i]), dq_limit_value[i]);
       bilateral_active_dq_adm(right_v_id[i]) =
@@ -3310,7 +3323,7 @@ namespace upperlimb_robot
     }
 
     const std::array<double, 7> torque_limit = {
-        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+        50.0, 30.0, 22.0, 24.0, 16.0, 16.0, 10.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -3533,7 +3546,9 @@ namespace upperlimb_robot
     for (std::size_t i = 0; i < 7; ++i)
     {
       const Eigen::Index ei = static_cast<Eigen::Index>(i);
-      left_ivda_q_adm(ei) = clampBetween(left_ivda_q_adm(ei), q_min[i], q_max[i]);
+      const double q_lo = std::max(q_min[i], q(ei) - ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      const double q_hi = std::min(q_max[i], q(ei) + ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      left_ivda_q_adm(ei) = clampBetween(left_ivda_q_adm(ei), q_lo, q_hi);
       left_ivda_dq_adm(ei) = clampAbs(left_ivda_dq_adm(ei), ADMITTANCE_DQ_LIMIT[i]);
     }
 
@@ -3565,7 +3580,7 @@ namespace upperlimb_robot
     }
 
     const std::array<double, 7> torque_limit = {
-        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+        50.0, 30.0, 22.0, 24.0, 16.0, 16.0, 10.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {
@@ -3765,7 +3780,9 @@ namespace upperlimb_robot
     for (std::size_t i = 0; i < 7; ++i)
     {
       const Eigen::Index ei = static_cast<Eigen::Index>(i);
-      right_ivda_q_adm(ei) = clampBetween(right_ivda_q_adm(ei), q_min[i], q_max[i]);
+      const double q_lo = std::max(q_min[i], q(ei) - ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      const double q_hi = std::min(q_max[i], q(ei) + ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      right_ivda_q_adm(ei) = clampBetween(right_ivda_q_adm(ei), q_lo, q_hi);
       right_ivda_dq_adm(ei) = clampAbs(right_ivda_dq_adm(ei), ADMITTANCE_DQ_LIMIT[i]);
     }
 
@@ -3797,7 +3814,7 @@ namespace upperlimb_robot
     }
 
     const std::array<double, 7> torque_limit = {
-        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+        50.0, 30.0, 22.0, 24.0, 16.0, 16.0, 10.0};
 
     // 右臂保持 -1.0 驱动方向映射
     for (std::size_t i = 0; i < 7; ++i)
@@ -4099,10 +4116,14 @@ namespace upperlimb_robot
 
     for (std::size_t i = 0; i < 7; ++i)
     {
+      const double l_lo = std::max(q_min[i], q(left_q_id[i]) - ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      const double l_hi = std::min(q_max[i], q(left_q_id[i]) + ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      const double r_lo = std::max(q_min[i], q(right_q_id[i]) - ADMITTANCE_DELTA_Q_MAX_RAD[i]);
+      const double r_hi = std::min(q_max[i], q(right_q_id[i]) + ADMITTANCE_DELTA_Q_MAX_RAD[i]);
       bilateral_ivda_q_adm(left_q_id[i]) =
-          clampBetween(bilateral_ivda_q_adm(left_q_id[i]), q_min[i], q_max[i]);
+          clampBetween(bilateral_ivda_q_adm(left_q_id[i]), l_lo, l_hi);
       bilateral_ivda_q_adm(right_q_id[i]) =
-          clampBetween(bilateral_ivda_q_adm(right_q_id[i]), q_min[i], q_max[i]);
+          clampBetween(bilateral_ivda_q_adm(right_q_id[i]), r_lo, r_hi);
       bilateral_ivda_dq_adm(left_v_id[i]) =
           clampAbs(bilateral_ivda_dq_adm(left_v_id[i]), ADMITTANCE_DQ_LIMIT[i]);
       bilateral_ivda_dq_adm(right_v_id[i]) =
@@ -4142,7 +4163,7 @@ namespace upperlimb_robot
     }
 
     const std::array<double, 7> torque_limit = {
-        50.0, 30.0, 22.0, 20.0, 16.0, 16.0, 10.0};
+        50.0, 30.0, 22.0, 24.0, 16.0, 16.0, 10.0};
 
     for (std::size_t i = 0; i < 7; ++i)
     {

@@ -96,28 +96,36 @@ QGroupBox#experimentPanel {
     background-color: #ffffff;
 }
 
+/* 仅作用于滚动容器自身，绝不影响子按钮背景色 */
+QScrollArea#controlScrollArea,
+QWidget#controlScrollContent {
+    background-color: #ffffff;
+    border: none;
+}
+
 QLabel[role="sectionTitle"] {
     color: #0f4c81;
     font-size: 12px;
     font-weight: 700;
-    padding: 4px 2px 1px 2px;
+    padding: 3px 2px 1px 2px;
 }
 
 QLabel[role="panelHint"] {
     color: #475569;
     font-size: 11px;
-    padding: 2px 1px 4px 1px;
+    padding: 2px 1px 3px 1px;
 }
 
 /* 普通控制按钮 */
 QPushButton {
-    min-height: 24px;
-    padding: 6px 10px;
+    min-height: 22px;
+    padding: 5px 8px;
     color: #1e293b;
     background-color: #f8fafc;
     border: 1px solid #94a3b8;
     border-radius: 6px;
     font-weight: 500;
+    outline: none;
 }
 
 QPushButton:hover {
@@ -135,8 +143,14 @@ QPushButton:pressed {
 QPushButton:checked {
     color: #ffffff;
     background-color: #1d6fa5;
-    border: 1px solid #15527c;
+    border: 2px solid #0f4c75;
     font-weight: 700;
+}
+
+QPushButton:checked:hover {
+    color: #ffffff;
+    background-color: #155e8f;
+    border: 2px solid #0b3a5b;
 }
 
 QPushButton:disabled {
@@ -148,42 +162,47 @@ QPushButton:disabled {
 /* 创新对照实验按钮（IVDA 自适应助力导纳，科研靛青高亮区分基线） */
 QPushButton[role="innovativeButton"] {
     color: #0f4c5c;
-    background-color: #eef9fb;
+    background-color: #ecfeff;
     border: 1px solid #0e7490;
     font-weight: 600;
 }
 
 QPushButton[role="innovativeButton"]:hover {
     color: #083344;
-    background-color: #d8f3f8;
+    background-color: #cffafe;
     border-color: #0891b2;
 }
 
-QPushButton[role="innovativeButton"]:checked {
+QPushButton[role="innovativeButton"]:checked,
+QPushButton[role="innovativeButton"]:checked:hover {
     color: #ffffff;
     background-color: #0e7490;
-    border: 1px solid #155e75;
+    border: 2px solid #155e75;
     font-weight: 700;
 }
 
 /* 醒目的安全停止按钮 */
 QPushButton#safetyStopButton {
-    min-height: 32px;
+    min-height: 30px;
     color: #ffffff;
     background-color: #dc2626;
     border: 1px solid #991b1b;
     font-weight: 700;
-    font-size: 14px;
+    font-size: 13px;
 }
 
 QPushButton#safetyStopButton:hover {
+    color: #ffffff;
     background-color: #b91c1c;
     border-color: #7f1d1d;
 }
 
-QPushButton#safetyStopButton:checked {
-    background-color: #b91c1c;
+QPushButton#safetyStopButton:checked,
+QPushButton#safetyStopButton:checked:hover {
+    color: #ffffff;
+    background-color: #991b1b;
     border: 2px solid #7f1d1d;
+    font-weight: 700;
 }
 
 /* CSV 记录开始/停止按钮 */
