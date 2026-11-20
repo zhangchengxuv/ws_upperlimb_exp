@@ -2420,13 +2420,13 @@ namespace upperlimb_robot
     else if (joint_profile == PASSIVE_JOINT_J7_ONLY)
       amp = {0.0, 0.0, 0.0, base_amp[3]};
 
-    // PID 参数（基于 2026-11-20 实机 100 Hz 数据整定）：
-    // 1. 实测原 Kp=0.8 存在 51~92 ms 滞后，适度提高至 Kp=1.2 减小相位滞后；
-    // 2. 加入小积分 Ki=0.20（限幅 ±3.0 deg*s，最大积分修正 ±0.6 deg）消除 L_EB1 约 +0.10 deg 重力静差；
-    // 3. 对微分项 de 做一阶低通滤波（alpha=0.20）并令 Kd=0.03，抑制 100 Hz 异步采样拍频导致的 qc 抖动。
-    constexpr double Kp = 1.2;
-    constexpr double Ki = 0.20;
-    constexpr double Kd = 0.03;
+    // PID 参数（基于 2026-11-20 实机频谱分析整定）：
+    // 位置外环存在约 60~95 ms 内环纯滞后，离散特征方程 1 + Kp*z^(-d) = 0 要求 Kp << 1.0；
+    // 原 Kp=0.8 接近临界且 Kp=1.2 会激发 5.3~8.3 Hz 抖动。
+    // 现改为低增益顺滑参数：Kp=0.30、Ki=0.05（紧限幅防饱和）、Kd=0.0，配合 smooth_time=25 消除抖动。
+    constexpr double Kp = 0.30;
+    constexpr double Ki = 0.05;
+    constexpr double Kd = 0.00;
     constexpr double DE_LPF_ALPHA = 0.20;
 
     // 背部 joint1~3 固定在进入模式时的初始角
@@ -2452,7 +2452,7 @@ namespace upperlimb_robot
       const double q_ref = q0 + ramp * amp[k] * std::sin(w * t + phase[k]);
       const double e = q_ref - q_meas;
 
-      passive_pid_e_int[k] = clampBetween(passive_pid_e_int[k] + e * dt, -3.0, 3.0);
+      passive_pid_e_int[k] = clampBetween(passive_pid_e_int[k] + e * dt, -2.0, 2.0);
       if (passive_pid_first_step)
       {
         passive_pid_e_prev[k] = e;
@@ -2477,7 +2477,7 @@ namespace upperlimb_robot
     }
     passive_pid_first_step = false;
 
-    // 速度/加速度参数（背部关节保持原保守参数；主动跟踪关节 J4~J7 适当减小 smooth_time 降低内环延迟）
+    // 速度/加速度参数（恢复原平滑 S 曲线 smooth_time=25、acc/dec=3.0，保证轨迹顺滑无抖动）
     output.target_velocity[IDX_J1] = pulsePerMsToJointSpeedDegPerSecMagnitude(11, 400.0);
     output.target_acc[IDX_J1] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(11, 0.5);
     output.target_dec[IDX_J1] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(11, 0.25);
@@ -2494,24 +2494,24 @@ namespace upperlimb_robot
     output.target_smooth_time[IDX_J3] = 25;
 
     output.target_velocity[IDX_J4] = pulsePerMsToJointSpeedDegPerSecMagnitude(14, 1200.0);
-    output.target_acc[IDX_J4] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(14, 5.0);
-    output.target_dec[IDX_J4] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(14, 5.0);
-    output.target_smooth_time[IDX_J4] = 10;
+    output.target_acc[IDX_J4] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(14, 3.0);
+    output.target_dec[IDX_J4] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(14, 3.0);
+    output.target_smooth_time[IDX_J4] = 25;
 
     output.target_velocity[IDX_J5] = pulsePerMsToJointSpeedDegPerSecMagnitude(15, 1200.0);
-    output.target_acc[IDX_J5] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(15, 5.0);
-    output.target_dec[IDX_J5] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(15, 5.0);
-    output.target_smooth_time[IDX_J5] = 10;
+    output.target_acc[IDX_J5] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(15, 3.0);
+    output.target_dec[IDX_J5] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(15, 3.0);
+    output.target_smooth_time[IDX_J5] = 25;
 
     output.target_velocity[IDX_J6] = pulsePerMsToJointSpeedDegPerSecMagnitude(16, 1200.0);
-    output.target_acc[IDX_J6] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(16, 5.0);
-    output.target_dec[IDX_J6] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(16, 5.0);
-    output.target_smooth_time[IDX_J6] = 10;
+    output.target_acc[IDX_J6] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(16, 3.0);
+    output.target_dec[IDX_J6] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(16, 3.0);
+    output.target_smooth_time[IDX_J6] = 25;
 
     output.target_velocity[IDX_J7] = pulsePerMsToJointSpeedDegPerSecMagnitude(17, 1200.0);
-    output.target_acc[IDX_J7] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(17, 5.0);
-    output.target_dec[IDX_J7] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(17, 5.0);
-    output.target_smooth_time[IDX_J7] = 10;
+    output.target_acc[IDX_J7] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(17, 3.0);
+    output.target_dec[IDX_J7] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(17, 3.0);
+    output.target_smooth_time[IDX_J7] = 25;
 
     // 末端关节固定
     output.use_position[17] = true;
@@ -2612,13 +2612,13 @@ namespace upperlimb_robot
     else if (joint_profile == PASSIVE_JOINT_J7_ONLY)
       amp = {0.0, 0.0, 0.0, base_amp[3]};
 
-    // PD + 速度前馈参数（基于 2026-11-20 实机辨识的 60~115 ms 位置内环延迟整定）：
-    // 1. 显式加入保守速度前馈提前量 Kff * dq_ref（45~65 ms，低于实测延迟，避免超调）；
-    // 2. Kp=1.0 纠偏，Kd=0.03 抑制速度误差同时避免放大编码器速度纹波；
-    // 3. t=0 时 dq_ref=0，保证零跳变平滑起步。
-    constexpr double Kp = 1.0;
-    constexpr double Kd = 0.03;
-    const std::array<double, 4> Kff_s = {0.045, 0.055, 0.065, 0.065}; // J4(GH1), J5(GH2), J6(GH3), J7(EB1)
+    // PD + 速度前馈参数（基于 2026-11-20 实机滞后与稳定性分析整定）：
+    // 1. 反馈增益 Kp=0.25 远小于延迟稳定边界 1.0，Kd=0.0 不引入测速噪声，彻底消除 5~8 Hz 抖动；
+    // 2. 用解析无噪速度前馈 Kff * dq_ref（开环提前量，不影响闭环稳定性）抵消 60~95 ms 内环滞后；
+    // 3. 恢复 smooth_time=25、acc/dec=3.0 保证柔顺平稳，且起步 t=0 时 dq_ref=0 零跳变。
+    constexpr double Kp = 0.25;
+    constexpr double Kd = 0.00;
+    const std::array<double, 4> Kff_s = {0.060, 0.080, 0.095, 0.085}; // J4(GH1), J5(GH2), J6(GH3), J7(EB1)
 
     // 背部 joint1~3 固定在进入模式时的初始角
     for (std::size_t i = 0; i < 3; ++i)
@@ -2679,24 +2679,24 @@ namespace upperlimb_robot
     output.target_smooth_time[IDX_J3] = 25;
 
     output.target_velocity[IDX_J4] = pulsePerMsToJointSpeedDegPerSecMagnitude(14, 1200.0);
-    output.target_acc[IDX_J4] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(14, 5.0);
-    output.target_dec[IDX_J4] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(14, 5.0);
-    output.target_smooth_time[IDX_J4] = 10;
+    output.target_acc[IDX_J4] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(14, 3.0);
+    output.target_dec[IDX_J4] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(14, 3.0);
+    output.target_smooth_time[IDX_J4] = 25;
 
     output.target_velocity[IDX_J5] = pulsePerMsToJointSpeedDegPerSecMagnitude(15, 1200.0);
-    output.target_acc[IDX_J5] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(15, 5.0);
-    output.target_dec[IDX_J5] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(15, 5.0);
-    output.target_smooth_time[IDX_J5] = 10;
+    output.target_acc[IDX_J5] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(15, 3.0);
+    output.target_dec[IDX_J5] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(15, 3.0);
+    output.target_smooth_time[IDX_J5] = 25;
 
     output.target_velocity[IDX_J6] = pulsePerMsToJointSpeedDegPerSecMagnitude(16, 1200.0);
-    output.target_acc[IDX_J6] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(16, 5.0);
-    output.target_dec[IDX_J6] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(16, 5.0);
-    output.target_smooth_time[IDX_J6] = 10;
+    output.target_acc[IDX_J6] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(16, 3.0);
+    output.target_dec[IDX_J6] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(16, 3.0);
+    output.target_smooth_time[IDX_J6] = 25;
 
     output.target_velocity[IDX_J7] = pulsePerMsToJointSpeedDegPerSecMagnitude(17, 1200.0);
-    output.target_acc[IDX_J7] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(17, 5.0);
-    output.target_dec[IDX_J7] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(17, 5.0);
-    output.target_smooth_time[IDX_J7] = 10;
+    output.target_acc[IDX_J7] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(17, 3.0);
+    output.target_dec[IDX_J7] = pulsePerMs2ToJointAccelDegPerSec2Magnitude(17, 3.0);
+    output.target_smooth_time[IDX_J7] = 25;
 
     // 末端关节固定
     output.use_position[17] = true;

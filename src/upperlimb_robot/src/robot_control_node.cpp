@@ -2286,9 +2286,8 @@ private:
   std::array<double, upperlimb_robot::AXIS_NUM> last_profile_dec_{};
   std::array<short, upperlimb_robot::AXIS_NUM> last_profile_smooth_time_{};
 
-  // 100 Hz 连续位置轨迹每步增量约 0.01~0.10 deg；原 0.05 deg 死区会导致低速段丢弃 66% 更新引发停顿纹波，
-  // 降至 0.005 deg（约 368 脉冲）使连续正弦跟踪更顺滑，同时不影响预设位姿定点模式。
-  double position_epsilon_ = 0.005;
+  // 100 Hz 连续位置轨迹每步增量约 0.01~0.10 deg；0.01 deg 兼顾顺滑流式更新与抑制微噪触发。
+  double position_epsilon_ = 0.01;
   double torque_epsilon_ = 0.01;
 };
 
